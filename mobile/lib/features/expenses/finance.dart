@@ -60,6 +60,12 @@ final movementProvider = FutureProvider.autoDispose.family<Movement, String>(
 final movementsProvider = AsyncNotifierProvider.autoDispose
     .family<MovementsModel, MovementPage, MovementFilter>(MovementsModel.new);
 
+void refreshFinance(WidgetRef ref) {
+  ref.invalidate(analyticsProvider);
+  ref.invalidate(movementsProvider);
+  ref.invalidate(movementProvider);
+}
+
 class Movement {
   Movement.fromJson(Json row)
     : id = row['id'] as String,

@@ -45,18 +45,22 @@ async function main() {
         "ON CONFLICT(email) DO UPDATE SET state='active',last_synced_at=now() RETURNING id",
         [owner.id, email],
       );
-      for (const [id, day, currency, minor, category] of [
+      await client.query('DELETE FROM notices WHERE mailbox_id=$1 AND message_id=ANY($2::text[])',
+        [mailbox.id, ['pending', 'pending-other']]);
+      for (const [id, day, currency, minor, category, provider = 'nequi'] of [
         ['cop', current, 'COP', 2_500_000, 'alimentacion'],
         ['usd', current, 'USD', 1250, 'transporte'],
         ['previous', previous, 'COP', 500_000, 'transporte'],
         ['pending', current, null, null, null],
+        ['pending-other', current, null, null, null, 'other'],
       ] as const) {
         const { rows: [notice] } = await client.query(
           'INSERT INTO notices (mailbox_id,message_id,received_at,provider,forwarded,status,reason,unconfirmed_fields) ' +
-          "VALUES ($1,$2,$3::date+interval '13 hours','nequi',false,$4,$5,$6) " +
+          "VALUES ($1,$2,$3::date+interval '13 hours',$4,false,$5,$6,$7) " +
           'ON CONFLICT(mailbox_id,message_id) DO UPDATE SET received_at=excluded.received_at RETURNING id',
-          [mailbox.id, id, day, minor ? 'registered' : 'pending',
-            minor ? null : 'missing_or_ambiguous_fields', minor ? null : ['amount']],
+          [mailbox.id, id, day, provider, minor ? 'registered' : 'pending',
+            minor ? null : provider === 'other' ? 'unverified_sender' : 'missing_or_ambiguous_fields',
+            minor || provider === 'other' ? null : ['amount']],
         );
         if (minor) {
           await client.query(

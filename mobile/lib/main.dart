@@ -96,6 +96,15 @@ final routerProvider = Provider((ref) {
                     path: ':id',
                     builder: (_, state) =>
                         NoticeScreen(state.pathParameters['id']!),
+                    routes: [
+                      GoRoute(
+                        path: 'confirm',
+                        builder: (_, state) => NoticeScreen(
+                          state.pathParameters['id']!,
+                          confirming: true,
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),

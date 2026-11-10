@@ -367,7 +367,7 @@ class _MovementDetailState extends ConsumerState<_MovementDetail> {
       await ref.read(financeRepositoryProvider).remove(item.id);
       if (!mounted) return;
       if (item.id == widget.item.id) context.pop();
-      _refreshFinance(ref);
+      refreshFinance(ref);
     } catch (error) {
       if (mounted) showMessage(context, failureMessage(error));
     } finally {
@@ -460,8 +460,15 @@ class _MovementDetailState extends ConsumerState<_MovementDetail> {
 }
 
 class MovementForm extends ConsumerStatefulWidget {
-  const MovementForm({super.key, this.existing, this.direction, this.currency});
+  const MovementForm({
+    super.key,
+    this.existing,
+    this.notice,
+    this.direction,
+    this.currency,
+  }) : assert(existing == null || notice == null);
   final Movement? existing;
+  final Notice? notice;
   final String? direction, currency;
 
   @override
@@ -470,30 +477,41 @@ class MovementForm extends ConsumerStatefulWidget {
 
 class _MovementFormState extends ConsumerState<MovementForm> {
   final _form = GlobalKey<FormState>();
-  final _id = requestId();
-  late final _amount = TextEditingController(
-    text: widget.existing == null
-        ? ''
-        : money(widget.existing!.minor, '').trim(),
-  );
-  late final _method = TextEditingController(text: widget.existing?.method);
-  late final _description = TextEditingController(
-    text: widget.existing?.description,
-  );
-  late String _currency =
-      widget.existing?.currency ??
-      (currencies.containsKey(widget.currency) ? widget.currency! : 'COP');
-  late String? _direction = widget.existing == null
-      ? widget.direction
-      : widget.existing!.income
-      ? 'income'
-      : 'expense';
-  late String? _category = widget.existing?.income == false
-      ? widget.existing?.category
-      : null;
-  late String _date = widget.existing?.date ?? isoDay(bogotaNow());
+  late final _id = requestId();
+  final _amount = TextEditingController();
+  final _method = TextEditingController();
+  final _description = TextEditingController();
+  String? _currency, _direction, _category, _date;
   bool _busy = false;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    final existing = widget.existing;
+    final notice = widget.notice;
+    final minor = existing?.minor ?? notice?.minor;
+    if (minor != null) _amount.text = money(minor, '').trim();
+    _method.text = existing?.method ?? notice?.paymentMethod ?? '';
+    _description.text = existing?.description ?? notice?.description ?? '';
+    if (notice != null) {
+      _currency = currencies.containsKey(notice.currency)
+          ? notice.currency
+          : null;
+      _direction = notice.direction;
+      _category = notice.category == 'ingresos' ? null : notice.category;
+      _date = notice.date;
+    } else {
+      _currency =
+          existing?.currency ??
+          (currencies.containsKey(widget.currency) ? widget.currency! : 'COP');
+      _direction = existing == null
+          ? widget.direction
+          : (existing.income ? 'income' : 'expense');
+      _category = existing?.income == false ? existing?.category : null;
+      _date = existing?.date ?? isoDay(bogotaNow());
+    }
+  }
 
   @override
   void dispose() {
@@ -505,27 +523,45 @@ class _MovementFormState extends ConsumerState<MovementForm> {
 
   Future<void> _save() async {
     if (_busy || !_form.currentState!.validate()) return;
-    if (_direction == null) {
-      setState(() => _error = 'Elige si es un ingreso o un gasto.');
+    final direction = _direction;
+    final date = _date;
+    if (direction == null || date == null) {
+      setState(
+        () => _error = direction == null
+            ? 'Elige si es un ingreso o un gasto.'
+            : 'Selecciona la fecha del movimiento.',
+      );
       return;
     }
+    final currency = _currency!;
     setState(() {
       _busy = true;
       _error = null;
     });
     final existing = widget.existing;
-    final repository = ref.read(financeRepositoryProvider);
+    final notice = widget.notice;
     final data = <String, dynamic>{
       'amountMinor': parseMinor(_amount.text)!.toString(),
-      'currency': _currency,
-      'direction': _direction,
-      'date': _date,
-      if (_direction == 'expense') 'category': _category,
+      'currency': currency,
+      'direction': direction,
+      'date': date,
+      if (direction == 'expense') 'category': _category,
       if (_method.text.trim().isNotEmpty) 'paymentMethod': _method.text.trim(),
       if (_description.text.trim().isNotEmpty)
         'description': _description.text.trim(),
     };
     try {
+      if (notice != null) {
+        final id = await ref
+            .read(expenseRepositoryProvider)
+            .confirm(notice.id, data);
+        if (!mounted) return;
+        refreshNotices(ref, notice.id);
+        refreshFinance(ref);
+        context.go(_noticePath('/history/movement/$id'));
+        return;
+      }
+      final repository = ref.read(financeRepositoryProvider);
       if (existing == null) {
         await repository.create(data, _id);
       } else {
@@ -535,28 +571,58 @@ class _MovementFormState extends ConsumerState<MovementForm> {
       if (existing == null) {
         context.go(
           financePath('/history', {
-            'tab': _direction!,
-            'currency': _currency,
-            'from': _date,
-            'to': _date,
+            'tab': direction,
+            'currency': currency,
+            'from': date,
+            'to': date,
           }),
         );
       } else {
         context.pop();
       }
-      _refreshFinance(ref);
+      refreshFinance(ref);
     } catch (error) {
-      if (mounted) setState(() => _error = failureMessage(error));
+      if (!mounted) return;
+      if (notice != null &&
+          error is ApiFailure &&
+          (error.status == 404 || error.status == 409)) {
+        refreshNotices(ref, notice.id);
+        refreshFinance(ref);
+        showMessage(context, failureMessage(error));
+        context.go(_noticePath('/history'));
+      } else {
+        setState(() => _error = failureMessage(error));
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  String _noticePath(String path) => financePath(path, {
+    ...GoRouterState.of(context).uri.queryParameters,
+    'tab': 'notices',
+  });
+
+  String get _saveLabel {
+    if (_busy) return 'Guardando…';
+    if (widget.notice != null) return 'Confirmar y registrar';
+    if (widget.existing != null) return 'Guardar cambios';
+    return switch (_direction) {
+      'income' => 'Guardar ingreso',
+      'expense' => 'Guardar gasto',
+      _ => 'Guardar movimiento',
+    };
   }
 
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
       title: Text(
-        widget.existing == null ? 'Registrar movimiento' : 'Editar movimiento',
+        widget.notice != null
+            ? 'Confirmar movimiento'
+            : widget.existing == null
+            ? 'Registrar movimiento'
+            : 'Editar movimiento',
       ),
     ),
     body: Form(
@@ -564,6 +630,12 @@ class _MovementFormState extends ConsumerState<MovementForm> {
       child: ListView(
         padding: const EdgeInsets.all(20),
         children: [
+          if (widget.notice != null) ...[
+            const Text(
+              'Revisa el correo original y completa los datos del movimiento.',
+            ),
+            const SizedBox(height: 12),
+          ],
           const Text('Tipo de movimiento'),
           Wrap(
             spacing: 8,
@@ -609,19 +681,32 @@ class _MovementFormState extends ConsumerState<MovementForm> {
             onChanged: _busy
                 ? null
                 : (value) => setState(() => _currency = value!),
+            validator: (value) =>
+                value == null ? 'Selecciona la moneda.' : null,
           ),
           const SizedBox(height: 12),
           OutlinedButton.icon(
             icon: const Icon(Icons.calendar_month),
-            label: Text('Fecha · ${dayLabel(_date)}'),
+            label: Text(
+              _date == null
+                  ? 'Seleccionar fecha'
+                  : 'Fecha · ${dayLabel(_date!)}',
+            ),
             onPressed: _busy
                 ? null
                 : () async {
+                    final today = DateUtils.dateOnly(bogotaNow());
+                    final first = DateTime(1900);
+                    final selected = DateTime.tryParse(_date ?? '') ?? today;
                     final value = await showDatePicker(
                       context: context,
-                      initialDate: DateTime.parse(_date),
-                      firstDate: DateTime(1900),
-                      lastDate: bogotaNow(),
+                      initialDate:
+                          selected.isBefore(first) || selected.isAfter(today)
+                          ? today
+                          : selected,
+                      firstDate: first,
+                      lastDate: today,
+                      currentDate: today,
                     );
                     if (mounted && value != null) {
                       setState(() => _date = isoDay(value));
@@ -670,8 +755,10 @@ class _MovementFormState extends ConsumerState<MovementForm> {
             ),
           ),
           const SizedBox(height: 12),
-          const Text(
-            'Origen manual · Aparecerá en el historial y en los totales.',
+          Text(
+            widget.notice != null
+                ? 'Origen correo · Aparecerá en el historial y en los totales.'
+                : 'Origen manual · Aparecerá en el historial y en los totales.',
           ),
           if (_error case final error?)
             Text(
@@ -682,28 +769,12 @@ class _MovementFormState extends ConsumerState<MovementForm> {
           FilledButton.icon(
             onPressed: _busy ? null : _save,
             icon: const Icon(Icons.check),
-            label: Text(
-              _busy
-                  ? 'Guardando…'
-                  : widget.existing != null
-                  ? 'Guardar cambios'
-                  : _direction == 'income'
-                  ? 'Guardar ingreso'
-                  : _direction == 'expense'
-                  ? 'Guardar gasto'
-                  : 'Guardar movimiento',
-            ),
+            label: Text(_saveLabel),
           ),
         ],
       ),
     ),
   );
-}
-
-void _refreshFinance(WidgetRef ref) {
-  ref.invalidate(analyticsProvider);
-  ref.invalidate(movementsProvider);
-  ref.invalidate(movementProvider);
 }
 
 BigInt? parseMinor(String text) {

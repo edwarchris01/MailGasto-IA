@@ -209,6 +209,45 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
   assert.equal((await db.query('SELECT 1 FROM transactions WHERE notice_id=$1', [dbJob.id])).rowCount, 1);
   assert.equal((await db.query('SELECT 1 FROM outbox WHERE dedupe_key=$1', ['registered:' + dbJob.id])).rowCount, 1);
 
+  const pendingPath = 'notices/' + pendingDetail.id;
+  const review = { amountMinor: '4200000', currency: 'COP', date: '2020-01-02', direction: 'income' };
+  const confirm = (path: string, data = review, cookie = owner) => request(path + '/confirm', 'POST', data, cookie);
+  const discard = (path: string, cookie = owner) => request(path, 'DELETE', undefined, cookie);
+  assert.equal((await confirm(pendingPath, review, other)).status, 404);
+  assert.equal((await discard(pendingPath, other)).status, 404);
+  assert.equal((await confirm(pendingPath, { ...review, amountMinor: '0' })).status, 400);
+  const confirmations = await Promise.all([confirm(pendingPath), confirm(pendingPath)]);
+  assert.deepEqual(confirmations.map(response => response.status), [200, 200]);
+  const [movement, retry] = await Promise.all(confirmations.map(response => response.json()));
+  assert.deepEqual(retry, movement);
+  assert.equal((await confirm(pendingPath, { ...review, amountMinor: '1' })).status, 409);
+  assert.equal((await discard(pendingPath)).status, 409);
+  const reviewed = await (await request('movements/' + movement.id, 'GET', undefined, owner)).json();
+  assert.deepEqual([reviewed.source, reviewed.notice_id, reviewed.amount_minor], ['email', pendingDetail.id, review.amountMinor]);
+  const reviewReport = await (await request(
+    'analytics?from=' + review.date + '&to=' + review.date + '&currency=COP', 'GET', undefined, owner,
+  )).json();
+  assert.equal(reviewReport.incomeMinor, review.amountMinor);
+
+  const addPending = async (messageId: string) => {
+    assert.equal((await (await post({ ...pending, messageId })).json()).outcome, 'stored');
+    const { items } = await (await request('notices?status=pending', 'GET', undefined, owner)).json();
+    assert.equal(items.length, 1);
+    return 'notices/' + items[0].id;
+  };
+  const discardPath = await addPending('discard-me');
+  assert.equal((await discard(discardPath)).status, 204);
+  assert.equal((await discard(discardPath)).status, 204);
+  assert.equal((await confirm(discardPath)).status, 409);
+  assert.equal((await (await post(direct('discard-me'))).json()).outcome, 'duplicate');
+  assert.equal((await request(discardPath, 'GET', undefined, owner)).status, 404);
+  const openNotices = await (await request('notices?unregistered=true', 'GET', undefined, owner)).json();
+  assert.deepEqual(openNotices.items.map((item: { status: string }) => item.status), ['error']);
+
+  const racePath = await addPending('review-race');
+  const [confirmResponse, discardResponse] = await Promise.all([confirm(racePath), discard(racePath)]);
+  assert.deepEqual([confirmResponse.status, discardResponse.status], confirmResponse.ok ? [200, 409] : [409, 204]);
+
   const authorize = await request('mailboxes/gmail/authorize', 'POST', {}, other);
   const location = new URL((await authorize.json()).url);
   assert.equal(location.searchParams.get('scope'), 'https://www.googleapis.com/auth/gmail.readonly');

@@ -44,6 +44,18 @@ class ExpenseRepository {
 
   Future<Notice> detail(String id) async =>
       Notice.fromJson(await api.object('notices/${Uri.encodeComponent(id)}'));
+
+  Future<String> confirm(String id, Json data) async {
+    final result = await api.object(
+      'notices/${Uri.encodeComponent(id)}/confirm',
+      method: 'POST',
+      body: data,
+    );
+    return result['id'] as String;
+  }
+
+  Future<void> discard(String id) =>
+      api.request('notices/${Uri.encodeComponent(id)}', method: 'DELETE');
 }
 
 class Notice {
@@ -56,6 +68,7 @@ class Notice {
       date = row['transaction_date'] as String?,
       currency = row['currency'] as String?,
       minor = BigInt.tryParse(row['amount_minor'] as String? ?? ''),
+      direction = row['direction'] as String?,
       paymentMethod = row['payment_method'] as String?,
       category = row['category'] as String?,
       description = row['description'] as String?,
@@ -70,6 +83,7 @@ class Notice {
   final String? date;
   final String? currency;
   final BigInt? minor;
+  final String? direction;
   final String? paymentMethod;
   final String? category;
   final String? description;
@@ -119,6 +133,11 @@ final historyProvider = AsyncNotifierProvider.autoDispose
     .family<HistoryViewModel, HistoryPage, HistoryFilters>(
       HistoryViewModel.new,
     );
+
+void refreshNotices(WidgetRef ref, String id) {
+  ref.invalidate(historyProvider);
+  ref.invalidate(noticeProvider(id));
+}
 
 class HistoryViewModel extends AsyncNotifier<HistoryPage> {
   HistoryViewModel(this.filters);

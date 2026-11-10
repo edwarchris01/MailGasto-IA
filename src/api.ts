@@ -233,6 +233,19 @@ export class Api {
     return this.history.detail((await this.accounts.current(req)).id, input(uuid, id));
   }
 
+  @Post('notices/:id/confirm')
+  @HttpCode(200)
+  async confirmNotice(@Req() req: Request, @Param('id') id: string, @Body() body: unknown) {
+    const owner = await this.accounts.current(req);
+    return this.history.confirm(owner.id, input(uuid, id), input(manualInput, body));
+  }
+
+  @Delete('notices/:id')
+  @HttpCode(204)
+  async discardNotice(@Req() req: Request, @Param('id') id: string) {
+    await this.history.discard((await this.accounts.current(req)).id, input(uuid, id));
+  }
+
   @Get('summary')
   async summary(@Req() req: Request, @Query() query: unknown) {
     return this.history.summary((await this.accounts.current(req)).id, input(filtersSchema, query));

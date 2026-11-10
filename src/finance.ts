@@ -51,7 +51,8 @@ function filterValues(account: string, filter: Filters) {
   return [account, filter.from ?? null, filter.to ?? null, filter.currency ?? null, filter.category ?? null];
 }
 
-function manualValues(data: Manual) {
+export function manualValues(data: Manual) {
+  if (data.date.startsWith('0000-')) throw new BadRequestException('Selecciona una fecha válida.');
   if (data.date > iso(DateTime.now().setZone(timezone))) throw new BadRequestException('Selecciona la fecha de hoy o una anterior.');
   return [data.amountMinor, data.currency, data.date, data.paymentMethod ?? null, data.description ?? null,
     data.direction === 'income' ? 'ingresos' : data.category, data.direction];

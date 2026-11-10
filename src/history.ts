@@ -1,10 +1,11 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { DateTime } from 'luxon';
+import type { PoolClient } from 'pg';
 import { z } from 'zod';
 import { Agent, intent } from './agent.js';
 import { Database } from './db.js';
 import { categories, category, day, normalize, redact, statuses, timezone } from './extraction.js';
-import { Finance } from './finance.js';
+import { Finance, manualInput, manualValues } from './finance.js';
 
 export const filtersSchema = z.object({ from: day.optional(), to: day.optional(), category: category.optional() });
 export const historySchema = filtersSchema.extend({
@@ -18,9 +19,19 @@ type Filters = z.infer<typeof filtersSchema>;
 type ChatFilters = Filters & { kind?: 'income' | 'expense' | 'comparison'; currency?: 'COP' | 'USD' | 'EUR' };
 const selection = 'n.id,n.provider,n.forwarded,n.received_at,n.status,n.reason,n.confidence,' +
   't.amount_minor::text AS amount_minor,t.currency,t.transaction_date::text,t.payment_method,t.description,t.category,t.direction';
+const reviewFields = ['amount_minor', 'currency', 'transaction_date', 'payment_method', 'description', 'category', 'direction'];
 
 function range(filters: Filters) {
   if (filters.from && filters.to && filters.from > filters.to) throw new BadRequestException('El periodo es inválido.');
+}
+
+async function lockNotice(client: PoolClient, account: string, id: string) {
+  const { rows: [notice] } = await client.query<{ status: string; reason: string | null }>(
+    'SELECT n.status,n.reason FROM notices n JOIN mailboxes m ON m.id=n.mailbox_id ' +
+    'WHERE m.account_id=$1 AND n.id=$2 FOR UPDATE OF n', [account, id],
+  );
+  if (!notice) throw new NotFoundException('Aviso no encontrado.');
+  return notice;
 }
 
 @Injectable()
@@ -38,7 +49,7 @@ export class History {
     ];
     const { rows } = await this.db.query(
       'SELECT ' + selection + ' FROM notices n JOIN mailboxes m ON m.id=n.mailbox_id ' +
-      'LEFT JOIN transactions t ON t.notice_id=n.id WHERE m.account_id=$1 ' +
+      "LEFT JOIN transactions t ON t.notice_id=n.id WHERE m.account_id=$1 AND n.status<>'discarded' " +
       "AND ($2::date IS NULL OR coalesce(t.transaction_date,(n.received_at AT TIME ZONE 'America/Bogota')::date)>=$2) " +
       "AND ($3::date IS NULL OR coalesce(t.transaction_date,(n.received_at AT TIME ZONE 'America/Bogota')::date)<=$3) " +
       "AND ($4::text IS NULL OR t.category=$4) AND ($5::text IS NULL OR n.status=$5) AND (NOT $8::boolean OR n.status<>'registered') " +
@@ -50,10 +61,49 @@ export class History {
   async detail(account: string, id: string) {
     const { rows: [record] } = await this.db.query(
       'SELECT ' + selection + ',n.unconfirmed_fields FROM notices n JOIN mailboxes m ON m.id=n.mailbox_id ' +
-      'LEFT JOIN transactions t ON t.notice_id=n.id WHERE m.account_id=$1 AND n.id=$2', [account, id],
+      "LEFT JOIN transactions t ON t.notice_id=n.id WHERE m.account_id=$1 AND n.id=$2 AND n.status<>'discarded'", [account, id],
     );
     if (!record) throw new NotFoundException('Aviso no encontrado.');
     return record;
+  }
+
+  async confirm(account: string, id: string, data: z.infer<typeof manualInput>) {
+    const values = manualValues({ ...data,
+      description: data.description ?? (data.direction === 'income' ? 'Ingreso por correo' : 'Gasto por correo'),
+    });
+    return this.db.transaction(async client => {
+      const notice = await lockNotice(client, account, id);
+      if (notice.status === 'pending') {
+        const { rows: [movement] } = await client.query<{ id: string }>(
+          'INSERT INTO transactions (notice_id,' + reviewFields.join(',') + ') VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ' +
+          'ON CONFLICT (notice_id) DO UPDATE SET (' + reviewFields.join(',') + ')=(' +
+          reviewFields.map(field => 'excluded.' + field).join(',') + ') RETURNING id', [id, ...values],
+        );
+        await client.query(
+          "UPDATE notices SET status='registered',reason='user_confirmed',unconfirmed_fields=NULL WHERE id=$1", [id],
+        );
+        return movement;
+      }
+      if (notice.status === 'registered' && notice.reason === 'user_confirmed') {
+        const { rows: [movement] } = await client.query<{ id: string }>(
+          'SELECT id FROM transactions WHERE notice_id=$1 AND (' + reviewFields.join(',') + ') IS NOT DISTINCT FROM ' +
+          '($2::bigint,$3::char(3),$4::date,$5::text,$6::text,$7::text,$8::text)', [id, ...values],
+        );
+        if (movement) return movement;
+      }
+      throw new ConflictException('El aviso ya no está pendiente.');
+    });
+  }
+
+  async discard(account: string, id: string) {
+    await this.db.transaction(async client => {
+      const notice = await lockNotice(client, account, id);
+      if (notice.status === 'discarded') return;
+      if (notice.status !== 'pending') throw new ConflictException('El aviso ya no está pendiente.');
+      await client.query(
+        "UPDATE notices SET status='discarded',reason='user_discarded',unconfirmed_fields=NULL WHERE id=$1", [id],
+      );
+    });
   }
 
   async summary(account: string, filters: Filters) {

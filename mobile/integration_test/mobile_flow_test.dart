@@ -107,6 +107,10 @@ void main() {
       expect(find.text('− COP 480.000,00'), findsWidgets);
       await _tap(tester, 'Eliminar');
       await _tap(tester, 'Eliminar');
+      await _waitFor(
+        tester,
+        find.text('No hay movimientos que coincidan con los filtros.'),
+      );
       expect(find.text('Gasto QA'), findsNothing);
 
       await _tap(tester, 'Perfil');
@@ -222,6 +226,70 @@ void main() {
         _origin != 'http://localhost:3105' ||
         _mailpit != 'http://localhost:8026',
   );
+
+  testWidgets(
+    'Resuelve avisos pendientes en Android',
+    (tester) async {
+      const storage = FlutterSecureStorage();
+      await storage.delete(key: 'mailgasto_session@$_origin');
+      addTearDown(() => storage.delete(key: 'mailgasto_session@$_origin'));
+      app.main();
+      await _settle(tester);
+      await _login(tester, _email);
+      await _waitFor(tester, find.text('COP 25.000,00'));
+      expect(find.text('COP 25.000,00'), findsWidgets);
+      await _waitFor(tester, find.text('Ver avisos pendientes'));
+      await _tap(tester, 'Ver avisos pendientes');
+
+      await _waitFor(tester, find.text('Nequi'));
+      await _tap(tester, 'Nequi');
+      await _tap(tester, 'Descartar aviso');
+      await _tap(tester, 'Cancelar');
+      expect(find.text('Detalle del aviso'), findsOneWidget);
+      expect(find.text('Descartar aviso').hitTestable(), findsOneWidget);
+      await _tap(tester, 'Descartar aviso');
+      await _tap(tester, 'Descartar');
+      await _waitFor(tester, find.text('Otro remitente'));
+      await tester.drag(
+        find.byType(CustomScrollView).hitTestable(),
+        const Offset(0, 350),
+      );
+      await _settle(tester);
+      expect(find.text('Nequi'), findsNothing);
+
+      await _tap(tester, 'Otro remitente');
+      expect(find.text('Monto por confirmar'), findsOneWidget);
+      expect(find.text('Confirmar movimiento').hitTestable(), findsOneWidget);
+      await _tap(tester, 'Confirmar movimiento');
+      final amount = tester.widget<TextFormField>(
+        find.byKey(const ValueKey('movement-amount')),
+      );
+      expect(amount.controller!.text, isEmpty);
+      await _tap(tester, 'Gasto');
+      await _enter(tester, 'movement-amount', '3.500');
+      await _tap(tester, 'Moneda');
+      await _tap(tester, 'COP');
+      await _tap(tester, 'Seleccionar fecha');
+      final picker = tester.element(find.byType(DatePickerDialog));
+      await _tap(tester, MaterialLocalizations.of(picker).okButtonLabel);
+      await _tap(tester, 'Categoría');
+      await _tap(tester, 'Compras');
+      await _enter(tester, 'movement-description', 'Compra confirmada QA');
+      await _tap(tester, 'Confirmar y registrar');
+      await _waitFor(tester, find.text('Detalle del movimiento'));
+      expect(find.text('− COP 3.500,00'), findsOneWidget);
+      expect(find.text('Correo').hitTestable(), findsOneWidget);
+      await tester.tap(find.byType(BackButton).hitTestable());
+      await _settle(tester);
+      final empty = find.text('No hay avisos que coincidan con los filtros.');
+      await _waitFor(tester, empty);
+      expect(empty, findsOneWidget);
+      await _tap(tester, 'Inicio');
+      await _waitFor(tester, find.text('COP 28.500,00'));
+      expect(find.text('COP 28.500,00'), findsWidgets);
+    },
+    skip: _origin != 'http://localhost:3105',
+  );
 }
 
 Future<void> _settle(WidgetTester tester) async {
@@ -240,13 +308,13 @@ Future<void> _waitFor(WidgetTester tester, Finder target) async {
 }
 
 Future<void> _tap(WidgetTester tester, String text) async {
-  final target = find.text(text).last;
-  await _show(tester, target);
-  await tester.tap(target);
+  final matches = find.text(text);
+  await _show(tester, matches, last: true);
+  await tester.tap(matches.last);
   await _settle(tester);
 }
 
-Future<void> _show(WidgetTester tester, Finder target) async {
+Future<void> _show(WidgetTester tester, Finder target, {bool last = false}) async {
   if (target.evaluate().isEmpty) {
     await tester.scrollUntilVisible(
       target,
@@ -261,7 +329,7 @@ Future<void> _show(WidgetTester tester, Finder target) async {
           .first,
     );
   }
-  await tester.ensureVisible(target);
+  await tester.ensureVisible(last ? target.last : target);
 }
 
 Future<void> _enter(WidgetTester tester, String key, String text) async {
