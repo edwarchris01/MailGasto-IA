@@ -67,8 +67,7 @@ void main() {
 
       await tap(tab('Análisis'));
       await waitFor(find.text('Gastos por categoría'));
-      await waitFor(find.text('Compras'));
-      await waitFor(find.text('COP 50.000,00'));
+      await waitFor(find.text('Compras · COP 50.000,00'));
 
       await tap(tab('Asistente'));
       await tap(find.text('¿Cuánto gasté en alimentación este mes?'));
