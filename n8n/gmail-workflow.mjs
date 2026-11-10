@@ -344,7 +344,7 @@ export function gmailOperations(flow, current) {
       const operations = [];
       if (!previous) operations.push({ type: 'addNode', node });
       else {
-        if (previous.name !== node.name) operations.push({ type: 'renameNode', nodeName: previous.name, newName: node.name });
+        if (previous.name !== node.name) operations.push({ type: 'renameNode', oldName: previous.name, newName: node.name });
         if (!isDeepStrictEqual(previous.parameters, node.parameters)) {
           operations.push({ type: 'updateNodeParameters', nodeName: node.name, parameters: node.parameters, replace: true });
         }
