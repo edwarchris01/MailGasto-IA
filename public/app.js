@@ -84,7 +84,8 @@ async function loadNotices() {
   $('notices').replaceChildren();
   $('notice-detail').replaceChildren();
   for (const row of notices.items) {
-    const li = element('li', statuses[row.status] + ' · ' + row.provider + (row.amount_minor ? ' · ' + money(row.amount_minor, row.currency) : ''));
+    const label = row.provider === 'other' ? 'Otro remitente' : row.provider;
+    const li = element('li', statuses[row.status] + ' · ' + label + (row.amount_minor ? ' · ' + money(row.amount_minor, row.currency) : ''));
     const detail = element('button', 'Ver detalle');
     action(detail, 'click', async () => {
       const value = await api('notices/' + row.id);

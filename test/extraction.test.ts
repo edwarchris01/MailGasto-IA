@@ -13,19 +13,31 @@ const notice = { provider: 'nequi', forwarded: false, text: sample } as const;
 
 test('recognizes notices and identifiable forwards and removes sensitive material', () => {
   const secret = ' cuenta 12345678901, cliente@demo.example, https://demo.example/historial';
-  assert.equal(candidate('bad@evil.example', 'Compra', sample, senders), null);
+  assert.equal(candidate('bad@evil.example', 'Compra', sample, senders)?.provider, 'other');
   assert.equal(candidate('alertas@nequi.example', 'Promoción de pagos', sample, senders), null);
   assert.equal(candidate('alertas@nequi.example', 'Aviso',
     'Tu código de seguridad para la transacción es 123456.', senders), null);
   assert.equal(candidate('alertas@nequi.example', '[MailGasto IA] Aviso pendiente', sample, senders), null);
   assert.equal(candidate('owner@example.test', 'Fwd: Aviso de compra',
-    '---------- Mensaje reenviado ---------\nDe: alertas@nequi.example <other@evil.example>\n\n' + sample, senders), null);
+    '---------- Mensaje reenviado ---------\nDe: alertas@nequi.example <other@evil.example>\n\n' + sample, senders)?.provider, 'other');
   const forwarded = candidate('owner@example.test', 'Fwd: Aviso de compra',
     'Nota personal\n---------- Mensaje reenviado ---------\nDe: Nequi <alertas@nequi.example>\nAsunto: Compra\n\n' +
     sample + secret, senders);
   assert.equal(forwarded?.forwarded, true);
   assert.match(forwarded?.text ?? '', /25\.000/);
   assert.doesNotMatch(forwarded?.text ?? '', /Nota personal|12345678901|@demo|https:/);
+});
+
+test('recognizes completed payments from other senders without registering them', () => {
+  const from = 'avisos@comercio.example';
+  const incoming = candidate(from, 'Transferencia recibida', 'Te abonaron COP 1.200 el 10/11/2026.', senders);
+  assert.equal(incoming?.provider, 'other');
+  assert.deepEqual(resolveExtraction(incoming!, valid), {
+    status: 'pending', reason: 'unverified_sender', confidence: 0, unconfirmedFields: [],
+  });
+  assert.equal(candidate(from, 'Solicitud de pago', 'Paga antes de mañana el saldo de COP 1.200.', senders), null);
+  assert.equal(candidate(from, 'Pago cancelado', 'La compra aprobada por COP 1.200 fue cancelada.', senders), null);
+  assert.equal(candidate(from, 'Compra aprobada', 'Compraste un plan.', senders), null);
 });
 
 test('requires grounded amount, date, currency, direction, method and threshold', () => {

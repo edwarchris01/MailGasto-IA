@@ -381,7 +381,7 @@ class _HomeConnectionsState extends ConsumerState<_HomeConnections> {
               : 'Vincular Gmail',
         ),
         subtitle: const Text(
-          'Importa avisos bancarios o registra movimientos manualmente.',
+          'Consulta los avisos por correo o registra movimientos manualmente.',
         ),
         trailing: TextButton(
           onPressed: () => setState(() => _dismissed = true),

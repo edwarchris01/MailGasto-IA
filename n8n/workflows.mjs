@@ -1,4 +1,5 @@
 // Builds importable workflows and the SDK payload for the remote draft.
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { buildGmailWorkflow, gmailOperations, gmailSdk } from './gmail-workflow.mjs';
 
@@ -11,7 +12,7 @@ const node = (type, typeVersion, name, position, parameters, options = {}) => ({
 const receive = (name, path, y) => node('n8n-nodes-base.webhook', 2.1, name, [0, y], {
   httpMethod: 'POST', path, authentication: 'headerAuth', responseMode: 'lastNode',
   responseData: 'firstEntryJson', options: {},
-}, { credentials: { httpHeaderAuth: webhookAuth } });
+}, { webhookId: randomUUID(), credentials: { httpHeaderAuth: webhookAuth } });
 
 const extractionPrompt = [
   'Extrae un movimiento bancario a partir del siguiente fragmento colombiano.',
@@ -52,7 +53,9 @@ const readResult = [
   '  if (value.error) return {json: {failed: true}, pairedItem: index};',
   '  const data = value.message?.content ?? value.content ?? value.response ?? value.output ?? value.text;',
   '  try {',
-  '    const result = typeof data === "string" ? JSON.parse(data) : data;',
+  '    const raw = typeof data === "string" ? data.trim() : data;',
+  String.raw`    const fenced = typeof raw === 'string' && /^\x60{3}(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n\x60{3}$/i.exec(raw);`,
+  '    const result = typeof raw === "string" ? JSON.parse(fenced ? fenced[1] : raw) : raw;',
   '    if (!result || typeof result !== "object" || Array.isArray(result)) throw Error("invalid model JSON");',
   '    return {json: {result}, pairedItem: index};',
   '  } catch { return {json: {failed: true}, pairedItem: index}; }',
@@ -86,7 +89,7 @@ const agent = graph('MailGasto IA · Extracción y consultas', [extract, intent]
 
 function sdk(workflow, branches) {
   const declarations = workflow.nodes.map((n, index) => {
-    const { type, typeVersion, ...config } = n;
+    const { type, typeVersion, webhookId, ...config } = n;
     const factory = type === 'n8n-nodes-base.webhook' ? 'trigger' : 'node';
     return 'const n' + index + ' = ' + factory + '(' + JSON.stringify({ type, version: typeVersion, config }) + ');';
   });

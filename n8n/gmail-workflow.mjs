@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 
@@ -133,7 +134,7 @@ return $input.all().flatMap(({json: mail}, i) => {
   const webhook = node('n8n-nodes-base.webhook', 2.1, 'Recibir Gmail vinculado', [960, 300], {
     httpMethod: 'POST', path: 'mailgasto-private-gmail', authentication: 'headerAuth', responseMode: 'onReceived',
     options: { responseCode: { values: { responseCode: 'customCode', customCode: 202 } }, noResponseBody: true },
-  }, stage ? { disabled: true } : { credentials: { httpHeaderAuth: agentCredential } });
+  }, { webhookId: randomUUID(), ...(stage ? { disabled: true } : { credentials: { httpHeaderAuth: agentCredential } }) });
   const oauth = code('Normalizar Gmail OAuth', [1200, 300], asItem + `
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 return $input.all().flatMap(({json}, i) => {
@@ -156,7 +157,8 @@ return $input.all().flatMap(({json}, i) => {
 });
 `);
   const bank = decision('¿Es aviso bancario?', [1680, 80], '={{ $json.notice ? "aviso" : "ignorar" }}', 'aviso');
-  const loop = node('n8n-nodes-base.splitInBatches', 3, 'Procesar avisos uno a uno', [1920, -80], { batchSize: 1 });
+  const needsReview = decision('¿Remitente sin verificar?', [1920, 80], '={{ $json.notice.provider }}', 'other');
+  const loop = node('n8n-nodes-base.splitInBatches', 3, 'Procesar avisos uno a uno', [1920, -140], { batchSize: 1 });
   const ask = node('@n8n/n8n-nodes-langchain.agent', 3.1, 'Clasificar aviso con AI Agent', [2160, -80], {
     promptType: 'define',
     text: '={{ JSON.stringify({ provider: $json.notice.provider, text: $json.notice.text }) }}',
@@ -234,7 +236,7 @@ return $input.all().flatMap(({json}, i) => {
   const next = code('Continuar lote', [2880, 300], asItem + `
 return $input.all().flatMap((_, i) => {
   const { result } = $('Preparar resultado para NestJS').itemMatching(i).json;
-  return result.status === 'ignored' ? [] : [output({ processed: true }, i)];
+  return result.status === 'ignored' || result.reason === 'unverified_sender' ? [] : [output({ processed: true }, i)];
 });
 `);
 
@@ -243,7 +245,8 @@ return $input.all().flatMap((_, i) => {
     let [source, outputIndex] = Array.isArray(start) ? start : [start, 0];
     for (const target of next) { edges.push([source, target, outputIndex]); source = target; outputIndex = 0; }
   }
-  chain(gmailTrigger, ids, queue, prepareRead, read, legacy, filter, bank, loop);
+  chain(gmailTrigger, ids, queue, prepareRead, read, legacy, filter, bank, needsReview, result);
+  chain([needsReview, 1], loop);
   chain([loop, 1], ask, result, post, confirm, clear);
   chain(post, next, loop);
   chain(retry, due, lease, prepareRead);
@@ -284,7 +287,7 @@ export function gmailSdk(flow, id = 'mailgasto-gmail') {
   const factoriesByType = { ai_languageModel: 'languageModel', ai_tool: 'tool' };
   const subnodeFactories = new Map(subnodes.map(link => [link.source, factoriesByType[link.connectionType]]));
   const ordered = [...flow.nodes.filter(node => subnodeFactories.has(node.name)), ...flow.nodes.filter(node => !subnodeFactories.has(node.name))];
-  const factories = ordered.map(({type, typeVersion, ...config}) => {
+  const factories = ordered.map(({type, typeVersion, webhookId, ...config}) => {
     const factory = subnodeFactories.get(config.name) ?? (/(?:gmailTrigger|scheduleTrigger|manualTrigger|webhook)$/.test(type) ? 'trigger' : 'node');
     const attached = subnodes.filter(link => link.target === config.name);
     const model = attached.find(link => link.connectionType === 'ai_languageModel');
@@ -311,7 +314,7 @@ export function gmailOperations(flow, current) {
   // Keep the existing Gmail Trigger ID, polling cursor and credential.
   return [
     ...current.nodes.filter(n => n.name !== 'Gmail Trigger').map(n => ({ type: 'removeNode', nodeName: n.name })),
-    ...flow.nodes.filter(n => n.name !== 'Gmail Trigger').flatMap(({onError, ...node}) => [
+    ...flow.nodes.filter(n => n.name !== 'Gmail Trigger').flatMap(({onError, webhookId, ...node}) => [
       { type: 'addNode', node },
       ...(onError ? [{ type: 'setNodeSettings', nodeName: node.name, settings: { onError } }] : []),
     ]),

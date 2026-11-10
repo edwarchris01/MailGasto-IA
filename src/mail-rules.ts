@@ -2,14 +2,18 @@
 // This module must not have runtime imports: workflows.mjs embeds it in n8n.
 export const categories = ['alimentacion', 'transporte', 'vivienda', 'ocio', 'salud', 'educacion', 'ingresos', 'otros'] as const;
 export type Category = typeof categories[number];
-export type Provider = 'nequi' | 'bancolombia';
+export const bankProviders = ['nequi', 'bancolombia'] as const;
+export const providers = [...bankProviders, 'other'] as const;
+export type Provider = typeof providers[number];
 export type NoticeText = { provider: Provider; forwarded: boolean; text: string };
-export type SenderMap = Readonly<Record<string, Provider>>;
+export type SenderMap = Readonly<Record<string, typeof bankProviders[number]>>;
 export const normalize = (text: string) => text.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
 const bareAddress = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
 const forwardedHeader = /(?:^|\n)[ \t]*(?:-+\s*(?:forwarded message|mensaje reenviado|original message|mensaje original)\s*-+|begin forwarded message:)[ \t]*\n/i;
 const transactionWords = /\b(?:compra|compraste|pago|pagaste|pag[oó]|transferencia|transferiste|enviaste|recibiste|consignaci[oó]n|retiro|retiraste|transacci[oó]n|movimiento|debitaron|abonaron)\b/i;
 const excluded = /\b(?:codigo (?:de (?:seguridad|verificacion)|otp)|verifica tu identidad|intento (?:de inicio|de compra)|transaccion (?:rechazada|declinada|fallida)|compra (?:rechazada|declinada|fallida)|promocion(?:es)?|oferta exclusiva|estado de cuenta|extracto mensual|confirma si (?:hiciste|realizaste))\b/i;
+const completed = /\b(?:pagaste|compraste|recibiste|transferiste|enviaste|te (?:abonaron|transfirieron)|recibimos tu pago|confirmacion de (?:tu )?(?:pago|compra|abono|transferencia)|(?:compra|pago|abono|transferencia|consignacion|transaccion|deposito) (?:confirmad[oa]|aprobad[oa]|recibid[oa]|realizad[oa]|exitos[oa]|aplicad[oa]|completad[oa]))\b/i;
+const notCompleted = /\b(?:pago (?:pendiente|rechazado|fallido|cancelado|programado)|pendiente de pago|solicitud de pago|paga antes de|fecha limite de pago|(?:compra|transferencia|transaccion) cancelad[oa]|(?:transferencia|transaccion) en proceso|saldo a pagar|cotizacion)\b/i;
 
 export function redact(text: string) {
   return text
@@ -44,13 +48,14 @@ export function candidate(from: string, subject: string, body: string, senders: 
   if (!sender) return null;
   const domain = '@' + sender.split('@')[1];
   const provider = Object.hasOwn(senders, sender) ? senders[sender] : Object.hasOwn(senders, domain) ? senders[domain] : null;
-  const text = normalize(subject + '\n' + body);
-  if ((provider !== 'nequi' && provider !== 'bancolombia') || !transactionWords.test(text) ||
-      excluded.test(normalize(subject)) || excluded.test(normalize(body.slice(0, 500)))) return null;
+  const excerpt = (subject + '\n' + body).split(/\n(?:--\s*$|aviso de confidencialidad|este correo es confidencial)/im, 1)[0].trim().slice(0, 5000);
+  const head = normalize(subject + '\n' + body.slice(0, 600));
+  if (excluded.test(head)) return null;
+  const trusted = provider === 'nequi' || provider === 'bancolombia';
+  if (trusted ? !transactionWords.test(normalize(excerpt)) :
+      !completed.test(head) || notCompleted.test(head) || ![...excerpt.matchAll(moneyAny)].some(match => parseMoney(match[0]))) return null;
   return {
-    provider, forwarded,
-    text: redact((subject + '\n' + body).split(/\n(?:--\s*$|aviso de confidencialidad|este correo es confidencial)/im, 1)[0]
-      .trim().slice(0, 5000)),
+    provider: trusted ? provider : 'other', forwarded, text: redact(excerpt),
   };
 }
 
@@ -147,6 +152,9 @@ export function inspectNotice(notice: Pick<NoticeText, 'provider' | 'text'>) {
 }
 
 export function resolveExtraction(notice: NoticeText, raw: unknown, technicalFailure = false) {
+  if (notice.provider === 'other') {
+    return { status: 'pending' as const, reason: 'unverified_sender' as const, confidence: 0, unconfirmedFields: [] };
+  }
   const { text, money, date, direction, paymentMethod, categoryHint } = inspectNotice(notice);
   const model = readModel(raw);
   const confidence = model?.confidence ?? (technicalFailure && money && date && direction ? 0.75 : 0);

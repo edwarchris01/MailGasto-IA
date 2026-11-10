@@ -352,7 +352,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                         Text(
                           widget.register
                               ? 'Crea tu cuenta para organizar tus movimientos.'
-                              : 'Consulta tus ingresos, gastos y avisos bancarios.',
+                              : 'Consulta tus ingresos, gastos y avisos por correo.',
                         ),
                         const SizedBox(height: 24),
                         if (widget.register) ...[

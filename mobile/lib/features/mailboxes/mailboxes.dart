@@ -95,7 +95,7 @@ class _MailboxesScreenState extends ConsumerState<MailboxesScreen> {
         title: const Text('Vincular con Google'),
         content: const Text(
           'MailGasto solicita acceso de solo lectura a Gmail para identificar '
-          'avisos bancarios y registrar sus movimientos. Puedes retirar el acceso '
+          'avisos de pagos e ingresos. Puedes retirar el acceso '
           'en cualquier momento desde Buzones.',
         ),
         actions: [
@@ -264,7 +264,7 @@ class _MailboxesScreenState extends ConsumerState<MailboxesScreen> {
             leading: Icon(Icons.shield_outlined),
             title: Text('Acceso de solo lectura'),
             subtitle: Text(
-              'Identificamos los avisos bancarios del buzón autorizado.',
+              'Identificamos avisos de pagos e ingresos en el buzón autorizado.',
             ),
           ),
           const ListTile(

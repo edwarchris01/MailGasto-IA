@@ -78,6 +78,7 @@ class Notice {
   String get providerLabel => switch (provider) {
     'nequi' => 'Nequi',
     'bancolombia' => 'Bancolombia',
+    'other' => 'Otro remitente',
     _ => provider,
   };
 
@@ -85,6 +86,9 @@ class Notice {
       minor == null || currency == null ? null : money(minor!, currency!);
 
   String get pendingExplanation {
+    if (reason == 'unverified_sender') {
+      return 'El correo parece confirmar un pago o ingreso. Revisa el mensaje original antes de registrar el movimiento.';
+    }
     const labels = {
       'amount': 'monto',
       'currency': 'moneda',

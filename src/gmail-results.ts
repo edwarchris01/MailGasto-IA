@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { queueMail } from './accounts.js';
 import { CONFIG, Config } from './config.js';
 import { Database } from './db.js';
-import { amountPattern, categories, currencies, directions, paymentMethods, redact, unconfirmedFields } from './mail-rules.js';
+import { amountPattern, bankProviders, categories, currencies, directions, paymentMethods, providers, redact, unconfirmedFields } from './mail-rules.js';
 
 export const messageIdPattern = /^[A-Za-z0-9_-]{1,200}$/;
 const timestamp = z.iso.datetime({ offset: true });
@@ -26,18 +26,19 @@ const identity = {
   attemptId: z.uuid().optional(),
 };
 const notice = {
-  ...identity, provider: z.enum(['nequi', 'bancolombia']), forwarded: z.boolean(),
+  ...identity, provider: z.enum(bankProviders), forwarded: z.boolean(),
 };
 export const gmailResult = z.discriminatedUnion('status', [
   z.strictObject({ ...identity, status: z.literal('ignored') }),
   z.strictObject({ ...notice, status: z.literal('registered'), confidence: z.number().min(0.7).max(1), movement }),
-  z.strictObject({ ...notice, status: z.literal('pending'), confidence: z.number().min(0).max(1),
-    reason: z.enum(['missing_or_ambiguous_fields', 'unconfirmed_extraction']),
+  z.strictObject({ ...notice, provider: z.enum(providers), status: z.literal('pending'), confidence: z.number().min(0).max(1),
+    reason: z.enum(['missing_or_ambiguous_fields', 'unconfirmed_extraction', 'unverified_sender']),
     unconfirmedFields: z.array(z.enum(unconfirmedFields)).max(unconfirmedFields.length).optional() }),
   z.strictObject({ ...notice, status: z.literal('error'), confidence: z.literal(0), reason: z.literal('extractor_unavailable') }),
-]).refine(value => value.source === 'oauth'
+]).refine(value => (value.source === 'oauth'
   ? value.deliveryId !== undefined && value.attemptId !== undefined && value.startedAt === undefined
-  : value.deliveryId === undefined && value.attemptId === undefined && value.startedAt !== undefined && value.status !== 'ignored');
+  : value.deliveryId === undefined && value.attemptId === undefined && value.startedAt !== undefined && value.status !== 'ignored') &&
+  (value.status !== 'pending' || (value.provider === 'other') === (value.reason === 'unverified_sender')));
 
 type Result = z.infer<typeof gmailResult>;
 type Mailbox = { id: string; account_id: string; state: string; generation: string; linked_at: Date; source: string };
@@ -94,7 +95,7 @@ export class GmailResults {
 }
 
 type NoticeEffect = { status: 'registered'; movement: Record<keyof z.infer<typeof movement>, string> } |
-  { status: 'pending' | 'error' };
+  { status: 'pending'; reason: string } | { status: 'error' };
 
 export async function saveNoticeEffects(client: PoolClient, config: Config, owner: string, noticeId: string, result: NoticeEffect) {
   if (result.status === 'registered') {
@@ -106,7 +107,7 @@ export async function saveNoticeEffects(client: PoolClient, config: Config, owne
     );
     await queueMail(client, config, owner, 'registered:' + noticeId, 'Movimiento registrado',
       'Registramos un movimiento de tu buzón vinculado. Consulta el detalle en ' + config.origin);
-  } else if (result.status === 'pending') {
+  } else if (result.status === 'pending' && result.reason !== 'unverified_sender') {
     await queueMail(client, config, owner, 'pending:' + noticeId, 'Aviso pendiente',
       'No pudimos confirmar todos los datos. Reenvía el aviso bancario completo y original al buzón vinculado.');
   }

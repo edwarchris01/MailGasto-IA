@@ -1,6 +1,6 @@
 # MailGasto IA
 
-El Gmail existente y los buzones vinculados por OAuth llegan al mismo filtro de n8n. Allí se identifican los avisos bancarios, se protege el texto y se verifica la extracción de Ollama. NestJS sincroniza los buzones OAuth y guarda los resultados en PostgreSQL junto con las notificaciones.
+El Gmail existente y los buzones vinculados por OAuth llegan al mismo filtro de n8n. Los avisos de remitentes bancarios configurados pasan por Ollama y se contrastan con el texto protegido antes de registrar un movimiento. Si otro remitente confirma un pago o un ingreso y el correo contiene un monto, se guarda como aviso para revisión sin cambiar el saldo. NestJS sincroniza los buzones OAuth y guarda los resultados en PostgreSQL.
 
 ## Desarrollo local
 
@@ -57,6 +57,10 @@ Publica `/.well-known/assetlinks.json` con `ANDROID_APP_LINK_SHA256` de la firma
 ### Producción en Dokploy
 
 GitHub Actions envía cada `push` a `main` al servicio `backend` de `MailGastoIA` mediante el secreto `DOKPLOY_DEPLOY_WEBHOOK`. Dokploy compila el `Dockerfile` de esa rama. Usa la conexión interna de PostgreSQL y el buzón `mailgastoia@styleplus.com.co` para SMTP. Guarda `DATABASE_URL`, `SMTP_URL`, `SMTP_FROM`, las credenciales de Google y las claves de aplicación en las variables de ejecución de Dokploy. Comprueba el despliegue en `GET /v1/health`.
+
+Conecta solamente `backend` y el contenedor `n8n` a la red overlay interna y adjuntable `mailgasto-integration`. Conserva sus redes originales para el proxy y cada base de datos. En el Compose de n8n, declara la red como externa y asigna al servicio el alias `mailgasto-n8n`. En Dokploy, configura `N8N_AGENT_URL=http://mailgasto-n8n:5678/webhook` y `N8N_GMAIL_WEBHOOK_URL=http://mailgasto-n8n:5678/webhook/mailgasto-private-gmail`. En el workflow, usa `http://mailgastoia-backend-ybnh2i:3105/v1/internal/gmail/results` como destino de los resultados y limita la credencial de ingesta a ese host. El webhook de consultas y el de Gmail usan la misma credencial de entrada.
+
+Antes de activar Gmail, comprueba la respuesta de la API desde n8n por la red interna y el bloqueo de `/v1/internal/` y de los webhooks privados en ambos dominios públicos. La lista de remitentes exactos es opcional y solo habilita el registro automático para bancos verificados. Habilita el disparador de Gmail directo solo cuando `LEGACY_GMAIL_ADDRESS` coincida con el buzón de su credencial. Gmail OAuth procesa mensajes recibidos después de la vinculación. La [prueba E2E en Android](docs/arquitectura-movil-flutter.md#e2e-con-n8n-y-ollama) verifica el guardado y la lectura en la app con datos de prueba.
 
 ## Validación de rendimiento
 

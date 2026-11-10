@@ -55,7 +55,8 @@ class NoticeScreen extends ConsumerWidget {
                       ),
                     ),
                   ),
-                if (notice.status == 'pending')
+                if (notice.status == 'pending' &&
+                    notice.reason != 'unverified_sender')
                   const ListTile(
                     leading: Icon(Icons.forward_to_inbox_outlined),
                     title: Text('Cómo reenviar el aviso'),
