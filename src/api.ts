@@ -13,6 +13,10 @@ import { GoogleSignin } from './google-signin.js';
 import { gmailResult, GmailResults } from './gmail-results.js';
 import { chatInput, filtersSchema, History, historySchema } from './history.js';
 
+const googleCallbackInput = z.object({
+  code: z.string().min(1).max(4096).optional(), state: tokenInput.shape.token,
+});
+
 @Controller('v1')
 export class Api {
   constructor(
@@ -113,25 +117,8 @@ export class Api {
 
   @Get('mobile/auth/google/callback')
   async googleCallback(@Query() query: unknown, @Res() res: Response) {
-    const params = input(z.object({
-      code: z.string().min(1).max(4096).optional(), state: tokenInput.shape.token,
-    }), query);
-    let fragment: string;
-    let message: string;
-    try {
-      const receipt = await this.google.receive(params.state, params.code);
-      fragment = receipt ? 'receipt=' + receipt : 'status=cancelled';
-      message = receipt ? 'Regresa a MailGasto para iniciar sesión.' : 'Se canceló el inicio de sesión con Google.';
-    } catch {
-      fragment = 'status=failed';
-      message = 'Google no pudo iniciar sesión. Puedes volver a MailGasto y acceder con tu correo.';
-    }
-    const link = this.config.origin + '/mobile/auth/google/return#' + fragment;
-    return res.set('Referrer-Policy', 'no-referrer').type('html').send(
-      '<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width">' +
-      '<title>MailGasto IA</title><main><h1>MailGasto IA</h1><p>' + message +
-      '</p><p><a href="' + link + '">Volver a MailGasto</a></p></main></html>',
-    );
+    return this.returnFromGoogle(query, res, '/mobile/auth/google/return',
+      (state, code) => this.google.receive(state, code));
   }
 
   @Post('mobile/auth/google/complete')
@@ -201,19 +188,26 @@ export class Api {
 
   @Get('mobile/mailboxes/gmail/callback')
   async mobileCallback(@Query() query: unknown, @Res() res: Response) {
-    const params = input(z.object({
-      code: z.string().min(1).max(4096).optional(),
-      state: tokenInput.shape.token,
-    }), query);
-    const receipt = await this.gmail.mobileCallback(params.state, params.code);
-    const fragment = receipt ? 'receipt=' + receipt : 'status=cancelled';
-    const link = this.config.origin + '/mobile/gmail/return#' + fragment;
-    return res.set('Referrer-Policy', 'no-referrer').type('html').send(
-      '<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width">' +
-      '<title>MailGasto IA</title><main><h1>MailGasto IA</h1><p>' +
-      (receipt ? 'Regresa a la app para confirmar la vinculación.' : 'La vinculación se canceló.') +
-      '</p><p><a href="' + link + '">Volver a MailGasto</a></p></main></html>',
-    );
+    return this.returnFromGoogle(query, res, '/mobile/gmail/return',
+      (state, code) => this.gmail.mobileCallback(state, code));
+  }
+
+  private async returnFromGoogle(
+    query: unknown,
+    res: Response,
+    path: '/mobile/auth/google/return' | '/mobile/gmail/return',
+    receive: (state: string, code?: string) => Promise<string | null>,
+  ) {
+    let fragment = 'status=failed';
+    try {
+      const { state, code } = input(googleCallbackInput, query);
+      const receipt = await receive(state, code);
+      fragment = receipt ? 'receipt=' + receipt : 'status=cancelled';
+    } catch {
+      // Show the failure in the app without exposing the provider response.
+    }
+    return res.set({ 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' })
+      .location(this.config.origin + path + '#' + fragment).status(303).end();
   }
 
   @Post('mobile/mailboxes/gmail/complete')

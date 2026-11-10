@@ -24,7 +24,7 @@ async function fixture(origin: string, google = false) {
   await app.listen(0, '127.0.0.1');
   const base = await app.getUrl();
   const request = (path: string, method = 'GET', data?: unknown, cookie = '') => fetch(base + '/v1/' + path, {
-    method, headers: { Origin: origin, Cookie: cookie, 'Content-Type': 'application/json' },
+    method, redirect: 'manual', headers: { Origin: origin, Cookie: cookie, 'Content-Type': 'application/json' },
     body: data === undefined ? undefined : JSON.stringify(data),
   });
   return { app, config, db: app.get(Database), request };
@@ -150,10 +150,13 @@ test('Google móvil verifica un token firmado y exige el verificador del disposi
     return realFetch(input, init);
   });
   const callback = await request('mobile/auth/google/callback?code=fixture&state=' + state);
-  assert.equal(callback.status, 200);
-  const body = await callback.text();
-  const receipt = /#receipt=([A-Za-z0-9_-]{43})/.exec(body)?.[1];
-  assert.ok(receipt, body);
+  assert.equal(callback.status, 303);
+  const link = new URL(callback.headers.get('location')!);
+  assert.equal(link.origin + link.pathname, 'https://mailgasto.example.test/mobile/auth/google/return');
+  assert.equal(link.search, '');
+  assert.equal(await callback.text(), '');
+  const receipt = /^#receipt=([A-Za-z0-9_-]{43})$/.exec(link.hash)?.[1];
+  assert.ok(receipt);
   assert.equal((await request('mobile/auth/google/complete', 'POST', { receipt, verifier: token() })).status, 400);
   const session = await request('mobile/auth/google/complete', 'POST', { receipt, verifier });
   assert.equal(session.status, 200);

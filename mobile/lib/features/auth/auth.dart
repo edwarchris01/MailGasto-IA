@@ -7,9 +7,9 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/api.dart';
+import '../../core/google_browser.dart';
 
 typedef Account = ({String id, String name, String email});
 
@@ -163,9 +163,11 @@ class AuthViewModel extends AsyncNotifier<Account?> {
     final uri = await _repository.google(challenge);
     final storage = ref.read(secureStorageProvider);
     await storage.write(key: _googleKey, value: verifier);
-    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+    try {
+      await openGoogleAuthorization(uri, _api.origin, GoogleFlow.signIn);
+    } catch (_) {
       await storage.delete(key: _googleKey);
-      throw const ApiFailure('No pudimos abrir el navegador.');
+      rethrow;
     }
   }
 

@@ -58,9 +58,8 @@ export async function createApp(config: Config, startWorker = true) {
     }]);
   });
   server.get(['/mobile/gmail/return', '/mobile/auth/google/return'], (_req, res) => {
-    return res.set('Referrer-Policy', 'no-referrer').type('text').send(
-      'Abre MailGasto IA en tu dispositivo Android y comprueba que los enlaces compatibles estén habilitados.',
-    );
+    return res.set({ 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' }).type('text')
+      .send('La autorización debe iniciarse desde MailGasto IA en Android.');
   });
   server.get(['/mobile/auth/reset', '/mobile/auth/delete'], (_req, res) => {
     res.set('Referrer-Policy', 'no-referrer').set('Cache-Control', 'no-store').sendFile(resolve('public/index.html'));

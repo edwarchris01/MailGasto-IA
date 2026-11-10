@@ -306,33 +306,51 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       await mobileApp.listen(0, '127.0.0.1');
       const mobileBase = await mobileApp.getUrl();
       const mobile = (path: string, cookie = '', body?: object) =>
-        fetch(mobileBase + '/v1/mobile/mailboxes/gmail/' + path, {
-          method: body === undefined ? 'GET' : 'POST',
+        fetch(mobileBase + '/v1/mobile/' + path, {
+          method: body === undefined ? 'GET' : 'POST', redirect: 'manual',
           headers: { Origin: mobileOrigin, Cookie: cookie, 'Content-Type': 'application/json' },
           body: body === undefined ? undefined : JSON.stringify(body),
         });
+      const gmailFlow = (path: string, cookie = '', body?: object) => mobile('mailboxes/gmail/' + path, cookie, body);
       const association = await (await fetch(mobileBase + '/.well-known/assetlinks.json')).json();
       assert.equal(association[0].target.sha256_cert_fingerprints[0], fingerprint);
-      const authorization = await mobile('authorize', other, { mailboxId: linked });
+      const authorization = await gmailFlow('authorize', other, { mailboxId: linked });
       assert.equal(authorization.status, 200);
       const googleUrl = new URL((await authorization.json()).url);
       assert.equal(googleUrl.searchParams.get('redirect_uri'), mobileOrigin + '/v1/mobile/mailboxes/gmail/callback');
       const callbackPath = 'callback?code=synthetic&state=' + googleUrl.searchParams.get('state');
-      const returned = await mobile(callbackPath);
-      assert.equal(returned.status, 200);
-      const html = await returned.text();
-      const receipt = html.match(/\/mobile\/gmail\/return#receipt=([A-Za-z0-9_-]{43})/)?.[1];
+      const returned = await gmailFlow(callbackPath);
+      assert.equal(returned.status, 303);
+      assert.equal(returned.headers.get('cache-control'), 'no-store');
+      assert.equal(returned.headers.get('referrer-policy'), 'no-referrer');
+      const link = new URL(returned.headers.get('location')!);
+      assert.equal(link.origin + link.pathname, mobileOrigin + '/mobile/gmail/return');
+      assert.equal(link.search, '');
+      const receipt = link.hash.match(/^#receipt=([A-Za-z0-9_-]{43})$/)?.[1];
       assert.ok(receipt);
-      assert.doesNotMatch(html, /code=synthetic/);
-      assert.equal((await mobile(callbackPath)).status, 400);
-      assert.equal((await mobile('complete', owner, { receipt })).status, 400);
-      assert.equal((await mobile('complete', other, { receipt })).status, 204);
-      assert.equal((await mobile('complete', other, { receipt })).status, 400);
+      assert.equal(await returned.text(), '');
+      const replay = await gmailFlow(callbackPath);
+      assert.equal(replay.status, 303);
+      assert.equal(replay.headers.get('location'), mobileOrigin + '/mobile/gmail/return#status=failed');
+      assert.equal((await gmailFlow('complete', owner, { receipt })).status, 400);
+      assert.equal((await gmailFlow('complete', other, { receipt })).status, 204);
+      assert.equal((await gmailFlow('complete', other, { receipt })).status, 400);
       assert.equal((await (await request('mailboxes', 'GET', undefined, other)).json())[0].state, 'active');
-      const cancelAuth = await mobile('authorize', other, {});
+      const cancelAuth = await gmailFlow('authorize', other, {});
       const cancelState = new URL((await cancelAuth.json()).url).searchParams.get('state');
-      const cancelled = await mobile('callback?error=access_denied&state=' + cancelState);
-      assert.match(await cancelled.text(), /#status=cancelled/);
+      const cancelled = await gmailFlow('callback?error=access_denied&state=' + cancelState);
+      assert.equal(cancelled.status, 303);
+      assert.equal(cancelled.headers.get('location'), mobileOrigin + '/mobile/gmail/return#status=cancelled');
+
+      const signin = await mobile('auth/google/authorize', '', { challenge: 'a'.repeat(43) });
+      assert.equal(signin.status, 200);
+      const signinState = new URL((await signin.json()).url).searchParams.get('state');
+      const cancelSignin = await mobile('auth/google/callback?error=access_denied&state=' + signinState);
+      assert.equal(cancelSignin.status, 303);
+      assert.equal(cancelSignin.headers.get('location'), mobileOrigin + '/mobile/auth/google/return#status=cancelled');
+      const replaySignin = await mobile('auth/google/callback?code=synthetic&state=' + signinState);
+      assert.equal(replaySignin.status, 303);
+      assert.equal(replaySignin.headers.get('location'), mobileOrigin + '/mobile/auth/google/return#status=failed');
     } finally {
       await mobileApp.close();
     }

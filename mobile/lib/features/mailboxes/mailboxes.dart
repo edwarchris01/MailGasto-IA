@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/api.dart';
 import '../../core/format.dart';
+import '../../core/google_browser.dart';
 import '../../core/widgets.dart';
 import '../auth/auth.dart';
 
@@ -113,9 +113,11 @@ class _MailboxesScreenState extends ConsumerState<MailboxesScreen> {
     if (accepted != true || !mounted) return;
     final uri = await ref.read(mailboxRepositoryProvider).authorize(id);
     if (!mounted) return;
-    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
-      throw const ApiFailure('No pudimos abrir el navegador.');
-    }
+    await openGoogleAuthorization(
+      uri,
+      ref.read(apiProvider).origin,
+      GoogleFlow.gmail,
+    );
   });
 
   Future<void> _disconnect(Mailbox mailbox) => _run(() async {

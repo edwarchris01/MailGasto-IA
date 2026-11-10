@@ -246,12 +246,13 @@ class _MailGastoAppState extends ConsumerState<MailGastoApp> {
       r'^receipt=([A-Za-z0-9_-]{43})$',
     ).firstMatch(fragment)?.group(1);
     final cancelled = fragment == 'status=cancelled';
+    final failed = fragment == 'status=failed';
     if (link.path == '/mobile/auth/google/return') {
       if (auth.asData?.value == null) await _resumeGoogle(fragment, receipt);
       return;
     }
     if (auth.asData?.value == null) return;
-    if ((!cancelled && receipt == null) ||
+    if ((!cancelled && !failed && receipt == null) ||
         (receipt != null && receipt == _lastReceipt)) {
       return;
     }
@@ -263,6 +264,8 @@ class _MailGastoAppState extends ConsumerState<MailGastoApp> {
     try {
       if (cancelled) {
         message = 'La vinculación se canceló.';
+      } else if (failed) {
+        message = 'No pudimos vincular Gmail. Vuelve a iniciar la vinculación.';
       } else {
         _lastReceipt = receipt;
         await ref.read(mailboxRepositoryProvider).complete(receipt!);

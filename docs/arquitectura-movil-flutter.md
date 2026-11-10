@@ -10,7 +10,7 @@ La app Android combina ingresos y gastos de avisos bancarios y de registros manu
 | Interfaz | Material 3, navegación con `go_router`, localización `es-CO` |
 | Aplicación | MVVM por funcionalidad y Riverpod para estado e inyección |
 | Datos | Repositorios sobre Dio, sesión en `flutter_secure_storage`, datos de pantalla en memoria |
-| Integración Android | Navegador externo mediante `url_launcher` y retorno por Android App Links mediante `app_links` |
+| Integración Android | Auth Tab para Google y Android App Links mediante `app_links` |
 | Servidor | NestJS aplica autenticación y reglas de negocio, PostgreSQL persiste y n8n con Ollama procesa avisos |
 
 La app vive en `mobile/`. Las vistas invocan comandos de sus ViewModels. Los ViewModels consumen repositorios y el cliente HTTP concentra el transporte, la cookie y la traducción de errores. Los importes se leen como centavos enteros a partir de `amount_minor`. Las fechas de calendario y las marcas de sincronización se presentan en `America/Bogota`. Las pantallas de lectura contemplan carga, vacío, error y actualización.
@@ -35,7 +35,7 @@ Las cuatro láminas y los estados se documentan en la [guía funcional](diseno-m
 | OAuth móvil | `POST /v1/mobile/mailboxes/gmail/authorize` acepta `mailboxId` opcional y devuelve `{url}`. Google vuelve a `GET /v1/mobile/mailboxes/gmail/callback`. Flutter recibe el comprobante y envía `{receipt}` a `POST /v1/mobile/mailboxes/gmail/complete`. |
 | Acceso con Google | `POST /v1/mobile/auth/google/authorize` acepta el desafío del dispositivo. `GET /v1/mobile/auth/google/callback` valida la identidad y el nonce. `POST /v1/mobile/auth/google/complete` canjea el comprobante y verificador por una sesión. |
 
-El callback valida el estado de OAuth y genera un comprobante de uso único de dos minutos. Android abre el App Link HTTPS `/mobile/gmail/return` y la app completa la operación con la sesión que la inició. NestJS mantiene el código de Google cifrado hasta el canje, conserva el verificador PKCE y almacena el token de renovación cifrado. Cerrar sesión o recibir un 401 de una ruta protegida borra la sesión local y los datos de pantalla de la cuenta.
+El callback valida el estado de OAuth y redirige directamente al App Link HTTPS de Gmail o del inicio de sesión. Auth Tab (Chrome 137 o posterior) entrega ese enlace a Flutter al cerrar la pestaña; los navegadores sin Auth Tab usan la asociación de Android App Links. No hay una página intermedia. El enlace lleva un comprobante de uso único de dos minutos o el resultado de cancelación o error. La app completa la vinculación con la sesión que la inició. NestJS conserva el verificador PKCE, mantiene el código de Gmail cifrado hasta el canje y almacena el token de renovación cifrado. Cerrar sesión o recibir un 401 de una ruta protegida borra la sesión local y los datos de pantalla de la cuenta.
 
 ## Desarrollo y validación Android
 
