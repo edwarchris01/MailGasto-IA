@@ -56,7 +56,7 @@ Publica `/.well-known/assetlinks.json` con `ANDROID_APP_LINK_SHA256` de la firma
 
 ### Producción en Dokploy
 
-El servicio `backend` de `MailGastoIA` se compila con el `Dockerfile` de `main` al recibir un evento `push`. Usa la conexión interna de PostgreSQL y el buzón `mailgastoia@styleplus.com.co` para SMTP. Guarda `DATABASE_URL`, `SMTP_URL`, `SMTP_FROM`, las credenciales de Google y las claves de aplicación en las variables de ejecución de Dokploy. Comprueba el despliegue en `GET /v1/health`.
+GitHub Actions envía cada `push` a `main` al servicio `backend` de `MailGastoIA` mediante el secreto `DOKPLOY_DEPLOY_WEBHOOK`. Dokploy compila el `Dockerfile` de esa rama. Usa la conexión interna de PostgreSQL y el buzón `mailgastoia@styleplus.com.co` para SMTP. Guarda `DATABASE_URL`, `SMTP_URL`, `SMTP_FROM`, las credenciales de Google y las claves de aplicación en las variables de ejecución de Dokploy. Comprueba el despliegue en `GET /v1/health`.
 
 ## Validación de rendimiento
 

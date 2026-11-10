@@ -1,0 +1,28 @@
+name: Desplegar MailGasto IA
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  dokploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Solicitar el despliegue a Dokploy
+        env:
+          DOKPLOY_DEPLOY_WEBHOOK: ${{ secrets.DOKPLOY_DEPLOY_WEBHOOK }}
+        run: |
+          if [ -z "$DOKPLOY_DEPLOY_WEBHOOK" ]; then
+            echo 'Configura DOKPLOY_DEPLOY_WEBHOOK en los secretos de GitHub Actions.' >&2
+            exit 1
+          fi
+
+          curl --proto '=https' --fail --silent --show-error \
+            --connect-timeout 10 --max-time 30 \
+            --header 'Content-Type: application/json' \
+            --header 'X-GitHub-Event: push' \
+            --data-binary "@$GITHUB_EVENT_PATH" \
+            --output /dev/null "$DOKPLOY_DEPLOY_WEBHOOK"
