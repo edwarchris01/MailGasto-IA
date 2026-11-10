@@ -88,7 +88,7 @@ Flutter consulta movimientos y análisis en NestJS. PostgreSQL mantiene separado
 
 **Continuar con Google** abre el navegador y solicita identidad básica. El permiso de lectura de Gmail se concede aparte desde **Buzones**. Para usar ambos flujos con Google real, el backend HTTPS necesita los clientes, las URI autorizadas y la asociación Android indicados en el [README](../../README.md).
 
-En cada implementación Flutter, ejecutar `flutter analyze` y `flutter test`, compilar el APK, instalarlo con `adb install -r` y abrir `co.com.styleplus.mailgasto/.MainActivity` mediante ADB. Usar HTTPS y Android App Links para validar el retorno real desde Google.
+En cada implementación Flutter, ejecutar `flutter analyze` y `flutter test`, compilar el APK e instalarlo en el teléfono físico con `adb -s SERIAL_DEL_TELEFONO install -r`. Abrir `co.com.styleplus.mailgasto/.MainActivity` mediante ADB y usar HTTPS y Android App Links para validar el retorno real desde Google.
 
 | Recorrido en Android | Resultado esperado |
 | --- | --- |

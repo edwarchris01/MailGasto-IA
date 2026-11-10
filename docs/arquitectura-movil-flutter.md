@@ -43,20 +43,21 @@ Desde `mobile/`, ejecutar `flutter pub get`, `flutter analyze` y `flutter test`.
 
 ```powershell
 adb devices -l
-adb reverse tcp:3105 tcp:3105
+$serialTelefono = 'SERIAL_DEL_TELEFONO'
+adb -s $serialTelefono reverse tcp:3105 tcp:3105
 flutter build apk --debug --dart-define=API_BASE_URL=http://localhost:3105
-adb install -r build/app/outputs/flutter-apk/app-debug.apk
-adb shell am start -n co.com.styleplus.mailgasto/.MainActivity
+adb -s $serialTelefono install -r build/app/outputs/flutter-apk/app-debug.apk
+adb -s $serialTelefono shell am start -n co.com.styleplus.mailgasto/.MainActivity
 ```
 
-El APK de depuración permite HTTP local. Para probar Google real, registrar las URI HTTPS de Gmail y acceso con Google que figuran en el [README](../README.md). Configurar `ANDROID_APP_LINK_SHA256` con la huella de la firma instalada para servir `/.well-known/assetlinks.json`. Compilar con ese mismo origen en `API_BASE_URL` y ajustar la propiedad Gradle `mailgastoAppLinkHost` si el host difiere de `mailgasto.styleplus.com.co`. Verificar la asociación con `adb shell pm get-app-links co.com.styleplus.mailgasto`.
+El APK de depuración permite HTTP local. Para probar Google real, registrar las URI HTTPS de Gmail y acceso con Google que figuran en el [README](../README.md). Configurar `ANDROID_APP_LINK_SHA256` con la huella de la firma instalada para servir `/.well-known/assetlinks.json`. Compilar con ese mismo origen en `API_BASE_URL` y ajustar la propiedad Gradle `mailgastoAppLinkHost` si el host difiere de `mailgasto.styleplus.com.co`. Verificar la asociación en el teléfono con `adb -s $serialTelefono shell pm get-app-links co.com.styleplus.mailgasto`.
 
 La prueba automatizada en Android usa una base separada, `mailgasto_mobile`, que debe existir en el PostgreSQL local. Arrancar Mailpit con Compose y ejecutar `node --env-file=.env --import tsx test/mobile-fixtures.ts` desde la raíz. El fixture acepta `MAILGASTO_MOBILE_DATABASE_URL`, `MAILGASTO_MOBILE_TEST_PORT`, `MAILGASTO_MOBILE_SMTP_URL` y `MAILGASTO_MOBILE_AGENT_URL` para apuntar a servicios locales aislados. Conectar el teléfono físico y ejecutar desde `mobile/`:
 
 ```powershell
-adb reverse tcp:3105 tcp:3115
-adb reverse tcp:8026 tcp:8026
-flutter test integration_test/mobile_flow_test.dart -d <serial> --dart-define=API_BASE_URL=http://localhost:3105 --dart-define=TEST_MAILPIT_URL=http://localhost:8026
+adb -s $serialTelefono reverse tcp:3105 tcp:3115
+adb -s $serialTelefono reverse tcp:8026 tcp:8026
+flutter test integration_test/mobile_flow_test.dart -d $serialTelefono --dart-define=API_BASE_URL=http://localhost:3105 --dart-define=TEST_MAILPIT_URL=http://localhost:8026
 ```
 
 En cada cambio Flutter, instalar el APK y recorrer en Android el flujo afectado. La matriz del piloto incluye registro y verificación, sesión al reabrir, aislamiento de cuentas, periodos y filtros, datos pendientes, chat con y sin resultados, y vinculación, cancelación, reconexión y desvinculación de Gmail. Desplegar el backend que acepta los resultados nuevos de extracción antes de actualizar el flujo de n8n.

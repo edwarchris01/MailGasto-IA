@@ -24,10 +24,11 @@ void main() {
       await _settle(tester);
       expect(find.text('Iniciar sesión'), findsOneWidget);
       await _tap(tester, 'Continuar con Google');
-      expect(
-        find.textContaining('todavía no está disponible en este servidor'),
-        findsOneWidget,
+      final googleUnavailable = find.textContaining(
+        'todavía no está disponible en este servidor',
       );
+      await _waitFor(tester, googleUnavailable);
+      expect(googleUnavailable, findsOneWidget);
 
       await _tap(tester, 'Crear cuenta');
       final newEmail =

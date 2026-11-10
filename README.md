@@ -52,7 +52,7 @@ En [Credenciales del proyecto mailgastoia](https://console.cloud.google.com/apis
 
 Si usas un solo cliente web, registra las tres URI en él y configura el par `GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET`. El secreto vive en el backend. La app recibe un comprobante de un solo uso y lo canjea por su sesión. El acceso admite cuentas Gmail y Google Workspace con correo verificado. Una cuenta local existente solo se asocia automáticamente si su correo ya está verificado.
 
-Publica `/.well-known/assetlinks.json` con `ANDROID_APP_LINK_SHA256` de la firma del APK instalado. Comprueba la asociación de `co.com.styleplus.mailgasto` en el teléfono con `adb shell pm get-app-links co.com.styleplus.mailgasto`. Los enlaces de retorno de Gmail y Google, recuperación de contraseña y confirmación de eliminación comparten el origen HTTPS. Consulta la [arquitectura móvil](docs/arquitectura-movil-flutter.md) y la [guía funcional](docs/diseno-movil/guia-funcional.md).
+Publica `/.well-known/assetlinks.json` con `ANDROID_APP_LINK_SHA256` de la firma del APK instalado. Comprueba la asociación en el teléfono físico con `adb -s SERIAL_DEL_TELEFONO shell pm get-app-links co.com.styleplus.mailgasto`. Los enlaces de retorno de Gmail y Google, recuperación de contraseña y confirmación de eliminación comparten el origen HTTPS. Consulta la [arquitectura móvil](docs/arquitectura-movil-flutter.md) y la [guía funcional](docs/diseno-movil/guia-funcional.md).
 
 ### Producción en Dokploy
 
