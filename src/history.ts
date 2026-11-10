@@ -1,0 +1,174 @@
+import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { DateTime } from 'luxon';
+import { z } from 'zod';
+import { Agent, intent } from './agent.js';
+import { Database } from './db.js';
+import { categories, category, day, normalize, redact, statuses, timezone } from './extraction.js';
+
+export const filtersSchema = z.object({ from: day.optional(), to: day.optional(), category: category.optional() });
+export const historySchema = filtersSchema.extend({
+  status: statuses.optional(),
+  page: z.coerce.number().int().min(1).max(10_000).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+});
+export const chatInput = z.object({ message: z.string().trim().min(1).max(1000) });
+type Filters = z.infer<typeof filtersSchema>;
+const selection = 'n.id,n.provider,n.forwarded,n.received_at,n.status,n.reason,n.confidence,' +
+  't.amount_minor::text AS amount_minor,t.currency,t.transaction_date::text,t.payment_method,t.description,t.category,t.direction';
+
+function range(filters: Filters) {
+  if (filters.from && filters.to && filters.from > filters.to) throw new BadRequestException('El periodo es inválido.');
+}
+
+@Injectable()
+export class History {
+  constructor(@Inject(Database) private readonly db: Database, @Inject(Agent) private readonly agent: Agent) {}
+
+  async list(account: string, filters: z.infer<typeof historySchema>) {
+    range(filters);
+    const values = [
+      account, filters.from ?? null, filters.to ?? null, filters.category ?? null, filters.status ?? null,
+      filters.limit + 1, (filters.page - 1) * filters.limit,
+    ];
+    const { rows } = await this.db.query(
+      'SELECT ' + selection + ' FROM notices n JOIN mailboxes m ON m.id=n.mailbox_id ' +
+      'LEFT JOIN transactions t ON t.notice_id=n.id WHERE m.account_id=$1 ' +
+      "AND ($2::date IS NULL OR coalesce(t.transaction_date,(n.received_at AT TIME ZONE 'America/Bogota')::date)>=$2) " +
+      "AND ($3::date IS NULL OR coalesce(t.transaction_date,(n.received_at AT TIME ZONE 'America/Bogota')::date)<=$3) " +
+      'AND ($4::text IS NULL OR t.category=$4) AND ($5::text IS NULL OR n.status=$5) ' +
+      'ORDER BY n.received_at DESC,n.id DESC LIMIT $6 OFFSET $7', values,
+    );
+    return { items: rows.slice(0, filters.limit), page: filters.page, hasMore: rows.length > filters.limit };
+  }
+
+  async detail(account: string, id: string) {
+    const { rows: [record] } = await this.db.query(
+      'SELECT ' + selection + ',n.unconfirmed_fields FROM notices n JOIN mailboxes m ON m.id=n.mailbox_id ' +
+      'LEFT JOIN transactions t ON t.notice_id=n.id WHERE m.account_id=$1 AND n.id=$2', [account, id],
+    );
+    if (!record) throw new NotFoundException('Aviso no encontrado.');
+    return record;
+  }
+
+  async summary(account: string, filters: Filters) {
+    range(filters);
+    const { rows } = await this.db.query<{ currency: string; category: string | null; amount_minor: string; count: number }>(
+      'SELECT t.currency,t.category,sum(t.amount_minor)::text AS amount_minor,count(*)::int AS count ' +
+      'FROM transactions t JOIN notices n ON n.id=t.notice_id JOIN mailboxes m ON m.id=n.mailbox_id ' +
+      "WHERE m.account_id=$1 AND n.status='registered' AND t.direction='expense' " +
+      'AND ($2::date IS NULL OR t.transaction_date>=$2) AND ($3::date IS NULL OR t.transaction_date<=$3) ' +
+      'AND ($4::text IS NULL OR t.category=$4) GROUP BY GROUPING SETS ((t.currency),(t.currency,t.category)) ' +
+      'ORDER BY t.currency,t.category NULLS FIRST', [account, filters.from ?? null, filters.to ?? null, filters.category ?? null],
+    );
+    return { totals: rows.filter(row => !row.category), categories: rows.filter(row => row.category) };
+  }
+
+  async newChat(account: string) {
+    const { rows } = await this.db.query(
+      'INSERT INTO chat_sessions (account_id) VALUES ($1) RETURNING id,created_at', [account],
+    );
+    return rows[0];
+  }
+
+  async chats(account: string) {
+    return (await this.db.query(
+      'SELECT id,created_at FROM chat_sessions WHERE account_id=$1 ORDER BY created_at DESC LIMIT 50', [account],
+    )).rows;
+  }
+
+  async turns(account: string, session: string) {
+    await this.assertChat(account, session);
+    const { rows } = await this.db.query(
+      'SELECT question,answer,created_at FROM chat_turns WHERE session_id=$1 ORDER BY id DESC LIMIT 100', [session],
+    );
+    return rows.reverse();
+  }
+
+  async chat(account: string, session: string, question: string) {
+    await this.assertChat(account, session);
+    const { rows: [last] } = await this.db.query<{ filters: Filters }>(
+      'SELECT filters FROM chat_turns WHERE session_id=$1 AND filters IS NOT NULL ORDER BY id DESC LIMIT 1', [session],
+    );
+    const previous = last?.filters;
+    let parsed: z.infer<typeof intent>;
+    const message = redact(question);
+    const rule = localIntent(message);
+    try {
+      parsed = intent.parse(await this.agent.understand(message, !!previous));
+      if (rule.action === 'register' || parsed.action === 'unknown' ||
+          (rule.action === 'summary' && (rule.category || rule.date || rule.period !== 'inherit'))) parsed = rule;
+      parsed.date = rule.date;
+    } catch {
+      parsed = rule;
+    }
+    let response: string;
+    let filters: Filters | undefined;
+    if (parsed.action === 'register') {
+      response = 'Reenvía el aviso bancario original al Gmail vinculado. Los movimientos se registran desde esos avisos.';
+    } else if (parsed.action === 'summary') {
+      filters = chatFilters(parsed, previous);
+      const report = await this.summary(account, filters);
+      const period = filters.from ? filters.from + ' a ' + filters.to : 'Todo el historial';
+      if (report.totals.length === 0) {
+        response = period + '. No hay gastos registrados para la consulta.';
+      } else {
+        const totals = report.totals.map(row => row.currency + ' ' + formatMinor(row.amount_minor));
+        const parts = report.categories.map(row => row.category + ': ' + row.currency + ' ' + formatMinor(row.amount_minor));
+        response = 'Total de gastos (' + period + '): ' + totals.join(' · ') + '. Por categoría: ' + parts.join(' · ') + '.';
+      }
+    } else {
+      response = 'Puedo resumir tus gastos registrados. Prueba «¿cuánto gasté ayer?» o «transporte este mes».';
+    }
+    await this.db.query(
+      'INSERT INTO chat_turns (session_id,question,answer,filters) ' +
+      'SELECT id,$3,$4,$5 FROM chat_sessions WHERE id=$1 AND account_id=$2',
+      [session, account, message, response, filters ? JSON.stringify(filters) : null],
+    );
+    return { answer: response };
+  }
+
+  private async assertChat(account: string, session: string) {
+    if (!(await this.db.query('SELECT 1 FROM chat_sessions WHERE account_id=$1 AND id=$2', [account, session])).rowCount) {
+      throw new NotFoundException('Conversación no encontrada.');
+    }
+  }
+}
+
+export function localIntent(question: string): z.infer<typeof intent> {
+  const text = normalize(question);
+  const categoryName = categories.find(value => text.includes(value)) ?? null;
+  const date = text.match(/\b\d{4}-\d{2}-\d{2}\b/)?.[0] ?? null;
+  const period = text.includes('ayer') ? 'yesterday' : text.includes('hoy') ? 'today' :
+    /mes (pasado|anterior)/.test(text) ? 'last_month' : text.includes('semana') ? 'week' :
+    text.includes('mes') ? 'month' : /historico|todo el historial|todos los gastos/.test(text) ? 'all' : 'inherit';
+  const action = /\b(?:registra|registrar|anota|agrega|agregar|pague|compre|gaste)\b.*\d/.test(text) && !text.includes('cuanto') ||
+    /\b(?:registra|registrar|anota|agrega|agregar)\b.*\b(?:gasto|pago|compra)\b/.test(text)
+    ? 'register' : categoryName || date || period !== 'inherit' || /cuanto|total|resumen|gastos/.test(text) ? 'summary' : 'unknown';
+  return { action, period, category: categoryName, date: date && day.safeParse(date).success ? date : null };
+}
+
+function chatFilters(parsed: z.infer<typeof intent>, previous?: Filters): Filters {
+  const today = DateTime.now().setZone(timezone);
+  const iso = (d: DateTime) => d.toISODate()!;
+  const resolved: Filters = {};
+  const period = parsed.period ?? 'inherit';
+  if (parsed.date) Object.assign(resolved, { from: parsed.date, to: parsed.date });
+  else if (period === 'today' || period === 'yesterday') {
+    const date = iso(today.minus({ days: period === 'yesterday' ? 1 : 0 }));
+    Object.assign(resolved, { from: date, to: date });
+  } else if (period === 'week' || period === 'month') {
+    Object.assign(resolved, { from: iso(today.startOf(period)), to: iso(today) });
+  } else if (period === 'last_month') {
+    const last = today.minus({ months: 1 });
+    Object.assign(resolved, { from: iso(last.startOf('month')), to: iso(last.endOf('month')) });
+  } else if (period === 'inherit') {
+    Object.assign(resolved, previous ? { from: previous.from, to: previous.to } : { from: iso(today.startOf('month')), to: iso(today) });
+  }
+  resolved.category = parsed.category ?? (period === 'inherit' && !parsed.date ? previous?.category : undefined);
+  return resolved;
+}
+
+function formatMinor(amount: string) {
+  const cents = BigInt(amount);
+  return new Intl.NumberFormat('es-CO').format(cents / 100n) + ',' + (cents % 100n).toString().padStart(2, '0');
+}

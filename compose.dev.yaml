@@ -1,0 +1,14 @@
+services:
+  db:
+    ports:
+      - "127.0.0.1:55433:5432"
+  api:
+    ports:
+      - "127.0.0.1:3105:3105"
+    environment:
+      SMTP_URL: smtp://mailpit:1025
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "127.0.0.1:8026:8025"
+      - "127.0.0.1:1026:1025"

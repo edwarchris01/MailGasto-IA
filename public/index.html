@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>MailGasto IA</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<main>
+  <header><h1>MailGasto IA</h1><p>Avisos bancarios, movimientos y consultas.</p></header>
+  <p id="status" role="status" aria-live="polite"></p>
+  <section id="access">
+    <form id="login"><h2>Iniciar sesión</h2>
+      <label>Correo <input type="email" name="email" autocomplete="username" required></label>
+      <label>Contraseña <input type="password" name="password" autocomplete="current-password" required></label>
+      <button>Entrar</button>
+    </form>
+    <form id="register"><h2>Crear cuenta</h2>
+      <label>Nombre <input name="name" autocomplete="name" maxlength="80" required></label>
+      <label>Correo <input type="email" name="email" autocomplete="email" required></label>
+      <label>Contraseña (12 caracteres o más) <input type="password" name="password" autocomplete="new-password" minlength="12" maxlength="128" required></label>
+      <button>Crear cuenta</button>
+    </form>
+  </section>
+  <form id="verify" hidden><h2>Verificar correo</h2>
+    <label>Contraseña que elegiste al registrarte <input type="password" name="password" autocomplete="current-password" required></label>
+    <button>Verificar</button>
+  </form>
+  <section id="workspace" hidden>
+    <div class="row"><h2 id="welcome">Tu cuenta</h2><button id="logout">Cerrar sesión</button></div>
+    <section>
+      <h3>Buzones</h3>
+      <p>MailGasto lee los avisos que llegan después de vincular Gmail. El modelo recibe únicamente el fragmento necesario para interpretar el movimiento.</p>
+      <div class="row"><button id="link">Vincular Gmail</button><button id="link-existing">Asociar Gmail de n8n</button></div>
+      <ul id="mailboxes"></ul>
+    </section>
+    <section>
+      <h3>Historial</h3>
+      <form id="filter" class="row">
+        <label>Desde <input name="from" type="date"></label><label>Hasta <input name="to" type="date"></label>
+        <label>Categoría <select name="category" id="categories"><option value="">Todas</option></select></label>
+        <label>Estado <select name="status"><option value="">Todos</option><option value="registered">Registrado</option><option value="pending">Pendiente</option><option value="processing">En proceso</option><option value="error">Error</option></select></label>
+        <button>Filtrar</button>
+      </form>
+      <p id="totals"></p>
+      <ul id="notices"></ul>
+      <button id="previous" hidden>Anterior</button><button id="next" hidden>Siguiente</button>
+      <div id="notice-detail" aria-live="polite"></div>
+    </section>
+    <section>
+      <h3>Chat privado</h3>
+      <div class="row"><label>Conversación <select id="conversations"></select></label><button id="new-chat">Nueva conversación</button></div>
+      <ol id="turns" aria-live="polite"></ol>
+      <form id="chat"><label>Mensaje <input name="message" maxlength="1000" required placeholder="¿Cuánto gasté este mes?"></label><button>Enviar</button></form>
+    </section>
+    <section>
+      <h3>Datos personales</h3>
+      <button id="delete-request">Solicitar eliminación por correo</button>
+      <button id="delete-confirm" hidden>Eliminar definitivamente mi cuenta</button>
+    </section>
+  </section>
+</main>
+</body>
+</html>
