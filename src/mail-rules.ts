@@ -299,6 +299,10 @@ export function resolveExtraction(notice: NoticeText, raw: unknown, technicalFai
 
 export function resolveGmailExtraction(notice: GmailNotice, model: ReturnType<typeof readGmailModel>) {
   const checked = inspectGmailNotice(notice);
+  const evidence = checked.text.replace(conditional, '');
+  if (model?.classification === 'not_transaction' && (expenseEvidence.test(evidence) || incomeEvidence.test(evidence))) {
+    model = { ...model, classification: 'uncertain' };
+  }
   if (model?.classification === 'not_transaction' || notCompleted.test(checked.text)) return { status: 'ignored' as const };
   const requireMethod = notice.provider !== 'other';
   if (!model && !requireMethod) return { status: 'error' as const, reason: 'extractor_unavailable' as const, confidence: 0 };

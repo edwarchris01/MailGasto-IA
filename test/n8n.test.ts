@@ -73,8 +73,14 @@ test('registers Agaval as Compras through Gmail direct and OAuth with no invente
   const notTransaction = {
     ...agavalModel, classification: 'not_transaction', amountMinor: null, currency: null, date: null, direction: null,
   };
-  assert.equal(filterAndResolve(direct, notTransaction), undefined);
-  const discarded = filterAndResolve(oauth, notTransaction);
+  assert.equal(filterAndResolve(direct, notTransaction).status, 'pending');
+  const contradictory = legacyInput('contradictory', receivedAt,
+    'Pagaste COP 50.000 y transferiste COP 60.000 el 10/11/2026.', shopSender, agavalSubject);
+  assert.deepEqual(filterAndResolve(contradictory, notTransaction).unconfirmedFields, ['amount']);
+  assert.equal(filterAndResolve(subjectOnly, notTransaction), undefined);
+  const discarded = filterAndResolve(oauthInput({
+    ...oauth[0].json.identity, labels: ['INBOX'], from: shopSender, subject: agavalSubject, text: '',
+  }), notTransaction);
   assert.equal(discarded.status, 'ignored');
   assert.ok(gmailResult.safeParse(discarded).success);
 });
