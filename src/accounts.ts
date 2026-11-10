@@ -38,7 +38,8 @@ export async function queueMail(
   );
 }
 
-type Account = { id: string; email: string; name: string; verified_at: Date | null; password_hash: string };
+type Account = { id: string; email: string; name: string; verified_at: Date | null; password_hash: string | null };
+export type AccountInfo = Pick<Account, 'id' | 'email' | 'name'>;
 
 @Injectable()
 export class Accounts {
@@ -67,7 +68,7 @@ export class Accounts {
       if (!id) {
         const existing = await client.query<Account>('SELECT * FROM accounts WHERE email=$1 FOR UPDATE', [values.email]);
         const account = existing.rows[0];
-        if (!account || account.verified_at || !await argon2.verify(account.password_hash, values.password)) return;
+        if (!account?.password_hash || account.verified_at || !await argon2.verify(account.password_hash, values.password)) return;
         const active = await client.query(
           "SELECT 1 FROM account_tokens WHERE account_id=$1 AND purpose='verify' AND expires_at>now()+interval '23 hours 55 minutes'",
           [account.id],
@@ -87,12 +88,12 @@ export class Accounts {
 
   async verify(value: string, password: string) {
     await this.db.transaction(async client => {
-      const result = await client.query<{ account_id: string; password_hash: string }>(
+      const result = await client.query<{ account_id: string; password_hash: string | null }>(
         "SELECT t.account_id,a.password_hash FROM account_tokens t JOIN accounts a ON a.id=t.account_id " +
         "WHERE t.token_hash=$1 AND t.purpose='verify' AND t.expires_at>now() FOR UPDATE OF a,t",
         [hash(value)],
       );
-      if (!result.rowCount || !await argon2.verify(result.rows[0].password_hash, password)) {
+      if (!result.rows[0]?.password_hash || !await argon2.verify(result.rows[0].password_hash, password)) {
         throw new BadRequestException('El enlace o la contraseña son inválidos.');
       }
       await client.query('DELETE FROM account_tokens WHERE token_hash=$1', [hash(value)]);
@@ -103,12 +104,83 @@ export class Accounts {
   async login(values: z.infer<typeof loginInput>, response: Response) {
     const { rows: [account] } = await this.db.query<Account>('SELECT * FROM accounts WHERE email=$1', [values.email]);
     const valid = await argon2.verify(account?.password_hash ?? await this.dummyHash, values.password);
-    if (!account || !valid) throw new UnauthorizedException('Correo o contraseña incorrectos.');
+    if (!account?.password_hash || !valid) throw new UnauthorizedException('Correo o contraseña incorrectos.');
     if (!account.verified_at) throw new ForbiddenException('Verifica tu correo antes de iniciar sesión.');
+    return this.issueSession(account, response, account.password_hash);
+  }
+
+  async issueSession(account: AccountInfo, response: Response, passwordHash?: string) {
     const session = token();
-    await this.db.query("INSERT INTO sessions VALUES ($1,$2,now()+interval '7 days')", [hash(session), account.id]);
+    if (passwordHash) {
+      const result = await this.db.query(
+        "INSERT INTO sessions SELECT $1,id,now()+interval '7 days' FROM accounts " +
+        'WHERE id=$2 AND password_hash=$3 AND verified_at IS NOT NULL FOR SHARE', [hash(session), account.id, passwordHash],
+      );
+      if (!result.rowCount) throw new UnauthorizedException('La contraseña cambió. Inicia sesión nuevamente.');
+    } else {
+      await this.db.query("INSERT INTO sessions VALUES ($1,$2,now()+interval '7 days')", [hash(session), account.id]);
+    }
     response.cookie('mailgasto_session', session, this.cookie());
     return { id: account.id, name: account.name, email: account.email };
+  }
+
+  async rename(account: string, name: string) {
+    const { rows: [updated] } = await this.db.query<AccountInfo>(
+      'UPDATE accounts SET name=$2 WHERE id=$1 RETURNING id,name,email', [account, name],
+    );
+    if (!updated) throw new UnauthorizedException('Inicia sesión para continuar.');
+    return updated;
+  }
+
+  async changePassword(account: string, session: string, current: string, password: string) {
+    const replacement = await argon2.hash(password, { type: argon2.argon2id });
+    await this.db.transaction(async client => {
+      const { rows: [row] } = await client.query<Pick<Account, 'password_hash'>>(
+        'SELECT password_hash FROM accounts WHERE id=$1 FOR UPDATE', [account],
+      );
+      if (!row?.password_hash) throw new BadRequestException('Usa recuperar contraseña para establecer una contraseña.');
+      if (!await argon2.verify(row.password_hash, current)) throw new BadRequestException('La contraseña actual es incorrecta.');
+      await client.query('UPDATE accounts SET password_hash=$2 WHERE id=$1', [account, replacement]);
+      await client.query("DELETE FROM account_tokens WHERE account_id=$1 AND purpose='reset'", [account]);
+      await client.query('DELETE FROM sessions WHERE account_id=$1 AND token_hash<>$2', [account, session]);
+    });
+  }
+
+  async requestReset(email: string) {
+    await this.db.transaction(async client => {
+      const { rows: [account] } = await client.query<{ id: string }>(
+        'SELECT id FROM accounts WHERE email=$1 AND verified_at IS NOT NULL FOR UPDATE', [email],
+      );
+      if (!account) return;
+      const active = await client.query(
+        "SELECT 1 FROM account_tokens WHERE account_id=$1 AND purpose='reset' AND expires_at>now()+interval '55 minutes'",
+        [account.id],
+      );
+      if (active.rowCount) return;
+      await client.query("DELETE FROM account_tokens WHERE account_id=$1 AND purpose='reset'", [account.id]);
+      const value = token();
+      await client.query("INSERT INTO account_tokens VALUES ($1,$2,'reset',now()+interval '1 hour')", [hash(value), account.id]);
+      await queueMail(client, this.config, account.id, 'reset:' + hash(value), 'Recupera tu contraseña',
+        'Abre este enlace para elegir una contraseña nueva: ' + this.config.origin + '/mobile/auth/reset#reset=' + value);
+    });
+  }
+
+  async resetPassword(value: string, password: string) {
+    const replacement = await argon2.hash(password, { type: argon2.argon2id });
+    await this.db.transaction(async client => {
+      const key = hash(value);
+      const { rows: [account] } = await client.query<{ id: string }>(
+        "SELECT a.id FROM accounts a WHERE a.verified_at IS NOT NULL AND EXISTS (SELECT 1 FROM account_tokens t " +
+        "WHERE t.account_id=a.id AND t.token_hash=$1 AND t.purpose='reset' AND t.expires_at>now()) FOR UPDATE", [key],
+      );
+      const used = account && await client.query(
+        "DELETE FROM account_tokens WHERE token_hash=$1 AND account_id=$2 AND purpose='reset' AND expires_at>now()",
+        [key, account.id],
+      );
+      if (!used?.rowCount) throw new UnprocessableEntityException('El enlace de recuperación expiró o ya fue usado.');
+      await client.query('UPDATE accounts SET password_hash=$2 WHERE id=$1', [account.id, replacement]);
+      await client.query('DELETE FROM sessions WHERE account_id=$1', [account.id]);
+    });
   }
 
   async current(req: Request) {
@@ -138,7 +210,7 @@ export class Accounts {
       await client.query("INSERT INTO account_tokens VALUES ($1,$2,'delete',now()+interval '1 hour')",
         [hash(value), accountId]);
       await queueMail(client, this.config, accountId, 'delete:' + hash(value), 'Confirma la eliminación',
-        'Si solicitaste eliminar tus datos, inicia sesión y confirma en ' + this.config.origin + '/#delete=' + value);
+        'Si solicitaste eliminar tus datos, inicia sesión y confirma en ' + this.config.origin + '/mobile/auth/delete#delete=' + value);
     });
   }
 

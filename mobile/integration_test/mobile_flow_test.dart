@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:mailgasto/main.dart' as app;
 
@@ -22,6 +23,11 @@ void main() {
       app.main();
       await _settle(tester);
       expect(find.text('Iniciar sesión'), findsOneWidget);
+      await _tap(tester, 'Continuar con Google');
+      expect(
+        find.textContaining('todavía no está disponible en este servidor'),
+        findsOneWidget,
+      );
 
       await _tap(tester, 'Crear cuenta');
       final newEmail =
@@ -46,8 +52,101 @@ void main() {
       await _verifyEmail(newEmail);
       await _tap(tester, 'Iniciar sesión');
       await _waitFor(tester, find.text('COP 0,00'));
-      expect(find.text('COP 0,00'), findsOneWidget);
+      expect(find.text('COP 0,00'), findsWidgets);
+      expect(find.text('Vincular Gmail'), findsOneWidget);
+
+      await _tap(tester, 'Registrar movimiento');
+      await _tap(tester, 'Ingreso');
+      await _enter(tester, 'movement-amount', '1.650.000');
+      await _enter(tester, 'movement-description', 'Ingreso QA');
+      await _tap(tester, 'Guardar ingreso');
+      await _waitFor(tester, find.text('Ingreso QA'));
+      expect(find.text('Ingreso QA'), findsOneWidget);
+      await _tap(tester, 'Registrar movimiento');
+      await _tap(tester, 'Gasto');
+      await _enter(tester, 'movement-amount', '486.000');
+      await _tap(tester, 'Categoría');
+      await _tap(tester, 'Alimentación');
+      await _enter(tester, 'movement-description', 'Gasto QA');
+      await _tap(tester, 'Guardar gasto');
+      await _waitFor(tester, find.text('Gasto QA'));
+      expect(find.text('Gasto QA'), findsOneWidget);
+
+      await _tap(tester, 'Análisis');
+      await _waitFor(tester, find.text('Ingresos vs. gastos'));
+      await _tap(tester, 'Ver tabla');
+      await _show(tester, find.text('Balance del periodo · COP 1.164.000,00'));
+      expect(
+        find.text('Balance del periodo · COP 1.164.000,00'),
+        findsOneWidget,
+      );
+
+      await _tap(tester, 'Asistente');
+      await _tap(tester, 'Compara mis ingresos y gastos');
+      await tester.tap(find.byTooltip('Enviar'));
+      await _settle(tester);
+      expect(find.textContaining('balance 1.164.000,00'), findsOneWidget);
+
+      await _tap(tester, 'Movimientos');
+      await _tap(tester, 'Ingresos');
+      await _tap(tester, 'Ingreso QA');
+      await _tap(tester, 'Editar');
+      await _enter(tester, 'movement-amount', '1.600.000');
+      await _tap(tester, 'Guardar cambios');
+      await _waitFor(tester, find.text('+ COP 1.600.000,00'));
+      expect(find.text('+ COP 1.600.000,00'), findsWidgets);
+      await tester.tap(find.byType(BackButton).hitTestable());
+      await _settle(tester);
+      await _tap(tester, 'Gastos');
+      await _tap(tester, 'Gasto QA');
+      await _tap(tester, 'Editar');
+      await _enter(tester, 'movement-amount', '480.000');
+      await _tap(tester, 'Guardar cambios');
+      await _waitFor(tester, find.text('− COP 480.000,00'));
+      expect(find.text('− COP 480.000,00'), findsWidgets);
+      await _tap(tester, 'Eliminar');
+      await _tap(tester, 'Eliminar');
+      expect(find.text('Gasto QA'), findsNothing);
+
+      await _tap(tester, 'Perfil');
+      await _tap(tester, 'Editar nombre');
+      await _enter(tester, 'profile-name', 'Nombre actualizado');
+      await _tap(tester, 'Guardar');
+      expect(find.text('Nombre actualizado'), findsOneWidget);
+      await _tap(tester, 'Seguridad y privacidad');
+      await _tap(tester, 'Cambiar contraseña');
+      await _enter(tester, 'current-password', _password);
+      await _enter(tester, 'new-password', 'synthetic-mobile-changed');
+      await _enter(tester, 'confirm-password', 'synthetic-mobile-changed');
+      await _tap(tester, 'Guardar cambios');
+      expect(find.text('Contraseña actualizada.'), findsOneWidget);
       await _logout(tester);
+
+      await _tap(tester, 'Olvidé mi contraseña');
+      await _enter(tester, 'recovery-email', newEmail);
+      await _tap(tester, 'Enviar enlace');
+      final reset = await _mailToken(newEmail, 'reset');
+      final recovery = tester.element(find.text('Recuperar contraseña'));
+      GoRouter.of(recovery).go('/reset', extra: reset);
+      await _settle(tester);
+      await _enter(tester, 'new-password', _password);
+      await _enter(tester, 'confirm-password', _password);
+      await _tap(tester, 'Guardar contraseña');
+      await _login(tester, newEmail);
+      await _waitFor(tester, find.text('Hola, Nombre'));
+      expect(find.text('Hola, Nombre'), findsOneWidget);
+      await _tap(tester, 'Perfil');
+      await _tap(tester, 'Seguridad y privacidad');
+      await _tap(tester, 'Solicitar eliminación');
+      await _tap(tester, 'Enviar confirmación');
+      final deletion = await _mailToken(newEmail, 'delete');
+      final security = tester.element(
+        find.text('Seguridad y privacidad').hitTestable(),
+      );
+      GoRouter.of(security).go('/settings/security/delete', extra: deletion);
+      await _settle(tester);
+      await _tap(tester, 'Eliminar definitivamente');
+      await _waitFor(tester, find.text('Iniciar sesión'));
 
       await _login(tester, _email);
       await _waitFor(tester, find.text('COP 25.000,00'));
@@ -71,8 +170,11 @@ void main() {
       expect(find.text('Datos por confirmar: monto.'), findsOneWidget);
       await tester.tap(find.byType(BackButton).hitTestable());
       await _settle(tester);
-      await _tap(tester, 'Limpiar filtros');
-      expect(find.text('USD 12,50'), findsOneWidget);
+      await _tap(tester, 'Todos');
+      await tester.tap(find.byTooltip('Moneda').hitTestable());
+      await _settle(tester);
+      await _tap(tester, 'USD');
+      expect(find.text('− USD 12,50'), findsOneWidget);
 
       await _tap(tester, 'Asistente');
       await _tap(tester, '¿Cuánto gasté en alimentación este mes?');
@@ -91,11 +193,17 @@ void main() {
         findsOneWidget,
       );
 
-      await _tap(tester, 'Configuración');
+      await _tap(tester, 'Perfil');
       await _tap(tester, 'Buzones');
       expect(find.textContaining('Última sincronización:'), findsOneWidget);
-      await _tap(tester, 'Vincular cuenta');
-      expect(find.textContaining('solo lectura'), findsOneWidget);
+      await _tap(tester, 'Vincular Gmail');
+      expect(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.textContaining('solo lectura'),
+        ),
+        findsOneWidget,
+      );
       await _tap(tester, 'Cancelar');
       await _tap(tester, 'Desvincular');
       await _tap(tester, 'Desvincular');
@@ -132,14 +240,32 @@ Future<void> _waitFor(WidgetTester tester, Finder target) async {
 
 Future<void> _tap(WidgetTester tester, String text) async {
   final target = find.text(text).last;
-  await tester.ensureVisible(target);
+  await _show(tester, target);
   await tester.tap(target);
   await _settle(tester);
 }
 
+Future<void> _show(WidgetTester tester, Finder target) async {
+  if (target.evaluate().isEmpty) {
+    await tester.scrollUntilVisible(
+      target,
+      160,
+      scrollable: find
+          .byWidgetPredicate(
+            (widget) =>
+                widget is Scrollable &&
+                widget.axisDirection == AxisDirection.down,
+          )
+          .hitTestable()
+          .first,
+    );
+  }
+  await tester.ensureVisible(target);
+}
+
 Future<void> _enter(WidgetTester tester, String key, String text) async {
   final target = find.byKey(ValueKey(key));
-  await tester.ensureVisible(target);
+  await _show(tester, target);
   await tester.enterText(target, text);
   await tester.pump();
 }
@@ -151,11 +277,25 @@ Future<void> _login(WidgetTester tester, String email) async {
 }
 
 Future<void> _logout(WidgetTester tester) async {
-  await _tap(tester, 'Configuración');
+  await _tap(tester, 'Perfil');
   await _tap(tester, 'Cerrar sesión');
 }
 
 Future<void> _verifyEmail(String email) async {
+  final client = Dio(BaseOptions(connectTimeout: const Duration(seconds: 5)));
+  try {
+    final verified = await client.post<void>(
+      '$_origin/v1/auth/verify',
+      data: {'token': await _mailToken(email, 'verify'), 'password': _password},
+      options: Options(headers: {'Origin': _origin}),
+    );
+    expect(verified.statusCode, 204);
+  } finally {
+    client.close();
+  }
+}
+
+Future<String> _mailToken(String email, String purpose) async {
   final client = Dio(BaseOptions(connectTimeout: const Duration(seconds: 5)));
   try {
     String? code;
@@ -171,19 +311,15 @@ Future<void> _verifyEmail(String email) async {
           '$_mailpit/api/v1/message/$id',
         );
         code = RegExp(
-          r'#verify=([A-Za-z0-9_-]{43})',
+          '#$purpose=([A-Za-z0-9_-]{43})',
         ).firstMatch(mail.data?['Text'] as String? ?? '')?.group(1);
-      } else {
+      }
+      if (code == null) {
         await Future<void>.delayed(const Duration(milliseconds: 300));
       }
     }
     expect(code, isNotNull);
-    final verified = await client.post<void>(
-      '$_origin/v1/auth/verify',
-      data: {'token': code, 'password': _password},
-      options: Options(headers: {'Origin': _origin}),
-    );
-    expect(verified.statusCode, 204);
+    return code!;
   } finally {
     client.close();
   }

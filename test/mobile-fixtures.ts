@@ -5,9 +5,12 @@ import { Database } from '../src/db.js';
 import { createApp } from '../src/main.js';
 
 async function main() {
-  const url = new URL(process.env.DATABASE_URL ?? '');
-  if (!['localhost', '127.0.0.1'].includes(url.hostname) || url.port !== '55433') {
-    throw new Error('Usa el PostgreSQL local de MailGasto en el puerto 55433.');
+  const url = new URL(process.env.MAILGASTO_MOBILE_DATABASE_URL ?? process.env.DATABASE_URL ?? '');
+  const smtp = new URL(process.env.MAILGASTO_MOBILE_SMTP_URL ?? 'smtp://localhost:1026');
+  const agent = process.env.MAILGASTO_MOBILE_AGENT_URL;
+  const local = (host: string) => ['localhost', '127.0.0.1'].includes(host);
+  if (!local(url.hostname) || !local(smtp.hostname) || (agent && !local(new URL(agent).hostname))) {
+    throw new Error('Las pruebas móviles requieren servicios locales.');
   }
   url.pathname = '/mailgasto_mobile';
   const email = 'movil-qa@example.test';
@@ -15,12 +18,14 @@ async function main() {
     ...process.env,
     DATABASE_URL: url.href,
     PUBLIC_URL: 'http://localhost:3105',
-    PORT: '3115',
-    SMTP_URL: 'smtp://localhost:1026',
-    N8N_AGENT_URL: '',
+    PORT: process.env.MAILGASTO_MOBILE_TEST_PORT ?? '3115',
+    SMTP_URL: smtp.href,
+    N8N_AGENT_URL: agent ?? '',
     N8N_GMAIL_WEBHOOK_URL: '',
     GOOGLE_CLIENT_ID: '',
     GOOGLE_CLIENT_SECRET: '',
+    GOOGLE_SIGNIN_CLIENT_ID: '',
+    GOOGLE_SIGNIN_CLIENT_SECRET: '',
     LEGACY_GMAIL_ADDRESS: email,
   });
   const app = await createApp(config);
@@ -65,7 +70,7 @@ async function main() {
     });
     app.enableShutdownHooks();
     await app.listen(config.PORT, '127.0.0.1');
-    console.info('API local de pruebas móviles en el puerto 3115.');
+    console.info('API local de pruebas móviles en el puerto ' + config.PORT + '.');
   } catch (error) {
     await app.close();
     throw error;

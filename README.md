@@ -32,13 +32,31 @@ El historial mantiene los estados `processing` (cola previa), `registered`, `pen
 ## Puesta en servicio en el servidor de n8n
 
 1. Configura el DNS y HTTPS de `mailgasto.styleplus.com.co`. Deniega `/v1/internal/` en el proxy público y `/webhook/mailgasto-private-*` y `/webhook-test/mailgasto-private-*` en el host público de n8n. Estas rutas usan la red privada `mailgasto-integration`.
-2. Crea el cliente OAuth web de Google para NestJS. Habilita Gmail API, agrega las cuentas piloto y registra `https://mailgasto.styleplus.com.co/v1/mailboxes/gmail/callback`. NestJS pide `gmail.readonly`; la credencial `Gmail account` de n8n sigue vinculada a su buzón original.
+2. Configura los clientes OAuth de tipo **Aplicación web** en el proyecto Google Cloud `mailgastoia` y habilita Gmail API para la vinculación. Agrega las cuentas piloto en **Google Auth Platform → Público** si la aplicación está en pruebas. Conserva la credencial `Gmail account` de n8n para su buzón original.
 3. Configura los secretos, SMTP, `LEGACY_GMAIL_ADDRESS` y los valores de OAuth en el servidor. Despliega con `docker compose -p mailgasto-ia up -d --build` y conecta n8n y el proxy a la red privada. Desde n8n, NestJS debe resolver como `mailgasto-api:3105`. Deja `N8N_GMAIL_WEBHOOK_URL` vacío hasta probar la ruta privada y publicar el flujo.
 4. Asigna `Ollama account 2` a **Ollama Chat Model**, conectado a **Clasificar aviso con AI Agent** con `qwen3.5:4b`. El agente puede consultar `consultar_reglas_aviso` y tiene un límite de dos iteraciones por aviso. Un fallo del agente activa las reglas de respaldo. El flujo envía un resultado a la vez y tiene un límite de ejecución de 150 s. Crea `MailGasto Agent Header` con `X-MailGasto-Agent` para `Recibir Gmail vinculado` y `MailGasto Ingest Header` con `X-MailGasto-Ingest` para `Entregar resultado a NestJS`. Activa ambos nodos tras asignar sus credenciales.
 5. Crea o reutiliza la tabla `MailGasto Gmail pendientes` en el mismo proyecto de n8n: `messageId`, `receivedAt` y `startedAt` (String), `retryAt` (Date), `attempts` (Number). Solo conserva los IDs del Gmail directo pendientes de confirmar. Copia al filtro la lista de remitentes verificados de `BANK_SENDERS_JSON`; favorece direcciones exactas y verifica cada formato con ejemplos anonimizados.
 6. Ejecuta **Fetch Test Event** en el Gmail Trigger y prueba con avisos sintéticos las dos entradas, la autenticación en ambos sentidos y el guardado real. Mantén deshabilitado el guardado de ejecuciones y desactiva **Available in MCP** para el workflow con datos reales. Publica después de probar con la cuenta piloto. Configura `N8N_GMAIL_WEBHOOK_URL` con la URL privada de producción `http://n8n:5678/webhook/mailgasto-private-gmail` (ajusta el nombre interno de n8n).
 
 `node --env-file-if-exists=.env n8n/workflows.mjs intake` genera el JSON importable. `intake-sdk` genera el SDK validable. `intake-operations <current-workflow.json>` genera cambios para el flujo existente conservando el ID del Gmail Trigger. Usa `MAILGASTO_N8N_TABLE_ID` para apuntar a la tabla por ID y `MAILGASTO_RESULTS_URL` para ajustar el destino privado de NestJS. `MAILGASTO_STAGE=1` genera un borrador con ambos nodos de comunicación con NestJS deshabilitados.
+
+### Google para Android y web
+
+En [Credenciales del proyecto mailgastoia](https://console.cloud.google.com/apis/credentials?project=mailgastoia), agrega las URI de redirección exactas del origen HTTPS desplegado.
+
+| Uso | URI autorizada | Configuración del servidor |
+| --- | --- | --- |
+| Vincular Gmail desde web | `https://mailgasto.styleplus.com.co/v1/mailboxes/gmail/callback` | `GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET` |
+| Vincular Gmail desde Android | `https://mailgasto.styleplus.com.co/v1/mobile/mailboxes/gmail/callback` | El mismo cliente de Gmail, con `gmail.readonly` |
+| Iniciar sesión con Google en Android | `https://mailgasto.styleplus.com.co/v1/mobile/auth/google/callback` | `GOOGLE_SIGNIN_CLIENT_ID` y `GOOGLE_SIGNIN_CLIENT_SECRET`, con `openid email profile` |
+
+Si usas un solo cliente web, registra las tres URI en él y configura el par `GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET`. El secreto vive en el backend. La app recibe un comprobante de un solo uso y lo canjea por su sesión. El acceso admite cuentas Gmail y Google Workspace con correo verificado. Una cuenta local existente solo se asocia automáticamente si su correo ya está verificado.
+
+Publica `/.well-known/assetlinks.json` con `ANDROID_APP_LINK_SHA256` de la firma del APK instalado. Comprueba la asociación de `co.com.styleplus.mailgasto` en el teléfono con `adb shell pm get-app-links co.com.styleplus.mailgasto`. Los enlaces de retorno de Gmail y Google, recuperación de contraseña y confirmación de eliminación comparten el origen HTTPS. Consulta la [arquitectura móvil](docs/arquitectura-movil-flutter.md) y la [guía funcional](docs/diseno-movil/guia-funcional.md).
+
+### Producción en Dokploy
+
+El servicio `backend` de `MailGastoIA` se compila con el `Dockerfile` de `main` al recibir un evento `push`. Usa la conexión interna de PostgreSQL y el buzón `mailgastoia@styleplus.com.co` para SMTP. Guarda `DATABASE_URL`, `SMTP_URL`, `SMTP_FROM`, las credenciales de Google y las claves de aplicación en las variables de ejecución de Dokploy. Comprueba el despliegue en `GET /v1/health`.
 
 ## Validación de rendimiento
 

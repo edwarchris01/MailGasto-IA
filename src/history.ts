@@ -4,15 +4,18 @@ import { z } from 'zod';
 import { Agent, intent } from './agent.js';
 import { Database } from './db.js';
 import { categories, category, day, normalize, redact, statuses, timezone } from './extraction.js';
+import { Finance } from './finance.js';
 
 export const filtersSchema = z.object({ from: day.optional(), to: day.optional(), category: category.optional() });
 export const historySchema = filtersSchema.extend({
   status: statuses.optional(),
+  unregistered: z.enum(['true', 'false']).optional(),
   page: z.coerce.number().int().min(1).max(10_000).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(25),
 });
 export const chatInput = z.object({ message: z.string().trim().min(1).max(1000) });
 type Filters = z.infer<typeof filtersSchema>;
+type ChatFilters = Filters & { kind?: 'income' | 'expense' | 'comparison'; currency?: 'COP' | 'USD' | 'EUR' };
 const selection = 'n.id,n.provider,n.forwarded,n.received_at,n.status,n.reason,n.confidence,' +
   't.amount_minor::text AS amount_minor,t.currency,t.transaction_date::text,t.payment_method,t.description,t.category,t.direction';
 
@@ -22,20 +25,23 @@ function range(filters: Filters) {
 
 @Injectable()
 export class History {
-  constructor(@Inject(Database) private readonly db: Database, @Inject(Agent) private readonly agent: Agent) {}
+  constructor(
+    @Inject(Database) private readonly db: Database, @Inject(Agent) private readonly agent: Agent,
+    @Inject(Finance) private readonly finance: Finance,
+  ) {}
 
   async list(account: string, filters: z.infer<typeof historySchema>) {
     range(filters);
     const values = [
       account, filters.from ?? null, filters.to ?? null, filters.category ?? null, filters.status ?? null,
-      filters.limit + 1, (filters.page - 1) * filters.limit,
+      filters.limit + 1, (filters.page - 1) * filters.limit, filters.unregistered === 'true',
     ];
     const { rows } = await this.db.query(
       'SELECT ' + selection + ' FROM notices n JOIN mailboxes m ON m.id=n.mailbox_id ' +
       'LEFT JOIN transactions t ON t.notice_id=n.id WHERE m.account_id=$1 ' +
       "AND ($2::date IS NULL OR coalesce(t.transaction_date,(n.received_at AT TIME ZONE 'America/Bogota')::date)>=$2) " +
       "AND ($3::date IS NULL OR coalesce(t.transaction_date,(n.received_at AT TIME ZONE 'America/Bogota')::date)<=$3) " +
-      'AND ($4::text IS NULL OR t.category=$4) AND ($5::text IS NULL OR n.status=$5) ' +
+      "AND ($4::text IS NULL OR t.category=$4) AND ($5::text IS NULL OR n.status=$5) AND (NOT $8::boolean OR n.status<>'registered') " +
       'ORDER BY n.received_at DESC,n.id DESC LIMIT $6 OFFSET $7', values,
     );
     return { items: rows.slice(0, filters.limit), page: filters.page, hasMore: rows.length > filters.limit };
@@ -79,52 +85,70 @@ export class History {
   async turns(account: string, session: string) {
     await this.assertChat(account, session);
     const { rows } = await this.db.query(
-      'SELECT question,answer,created_at FROM chat_turns WHERE session_id=$1 ORDER BY id DESC LIMIT 100', [session],
+      "SELECT question,answer,created_at,ui_action AS action,CASE WHEN filters->>'from' IS NOT NULL AND " +
+      "filters->>'to' IS NOT NULL THEN jsonb_build_object('from',filters->>'from','to',filters->>'to'," +
+      "'currency',filters->>'currency') END AS range FROM chat_turns WHERE session_id=$1 ORDER BY id DESC LIMIT 100", [session],
     );
     return rows.reverse();
   }
 
   async chat(account: string, session: string, question: string) {
     await this.assertChat(account, session);
-    const { rows: [last] } = await this.db.query<{ filters: Filters }>(
+    const { rows: [last] } = await this.db.query<{ filters: ChatFilters }>(
       'SELECT filters FROM chat_turns WHERE session_id=$1 AND filters IS NOT NULL ORDER BY id DESC LIMIT 1', [session],
     );
     const previous = last?.filters;
     let parsed: z.infer<typeof intent>;
     const message = redact(question);
     const rule = localIntent(message);
+    const finance = chatKind(question);
     try {
       parsed = intent.parse(await this.agent.understand(message, !!previous));
       if (rule.action === 'register' || parsed.action === 'unknown' ||
-          (rule.action === 'summary' && (rule.category || rule.date || rule.period !== 'inherit'))) parsed = rule;
+          (rule.action === 'summary' && (finance || rule.category || rule.date || rule.period !== 'inherit'))) parsed = rule;
       parsed.date = rule.date;
     } catch {
       parsed = rule;
     }
     let response: string;
-    let filters: Filters | undefined;
+    let filters: ChatFilters | undefined;
     if (parsed.action === 'register') {
-      response = 'Reenvía el aviso bancario original al Gmail vinculado. Los movimientos se registran desde esos avisos.';
+      response = 'Abre «Registrar movimiento» para añadir un ingreso o gasto manual. Reenvía el aviso bancario original al Gmail vinculado para registrarlo por correo.';
     } else if (parsed.action === 'summary') {
       filters = chatFilters(parsed, previous);
-      const report = await this.summary(account, filters);
+      filters.kind = finance ?? (parsed.category === 'ingresos' ? 'income' :
+        parsed.category ? 'expense' : previous?.kind ?? 'expense');
+      const currency = normalize(question).match(/\b(cop|usd|eur|dolares|euros)\b/)?.[1];
+      filters.currency = currency === 'cop' ? 'COP' : currency === 'usd' || currency === 'dolares' ? 'USD' :
+        currency ? 'EUR' : previous?.currency;
+      if (filters.kind !== 'expense') delete filters.category;
+      const report = (await this.finance.byCurrency(account, filters)).filter(row =>
+        filters?.kind === 'comparison' || (filters?.kind === 'income' ? row.incomeMinor !== '0' : row.expenseMinor !== '0'));
       const period = filters.from ? filters.from + ' a ' + filters.to : 'Todo el historial';
-      if (report.totals.length === 0) {
-        response = period + '. No hay gastos registrados para la consulta.';
+      const kind = filters.kind === 'comparison' ? 'ingresos y gastos' : filters.kind === 'income' ? 'ingresos' : 'gastos';
+      if (!report.length) {
+        response = period + (filters.currency ? ' · ' + filters.currency : '') + '. No hay ' + kind + ' registrados para la consulta.';
       } else {
-        const totals = report.totals.map(row => row.currency + ' ' + formatMinor(row.amount_minor));
-        const parts = report.categories.map(row => row.category + ': ' + row.currency + ' ' + formatMinor(row.amount_minor));
-        response = 'Total de gastos (' + period + '): ' + totals.join(' · ') + '. Por categoría: ' + parts.join(' · ') + '.';
+        const totals = report.map(row => filters?.kind === 'comparison' ?
+          row.currency + ' — Ingresos ' + formatMinor(row.incomeMinor) + ', gastos ' + formatMinor(row.expenseMinor) +
+          ', balance ' + formatMinor(row.balanceMinor) :
+          row.currency + ' ' + formatMinor(filters?.kind === 'income' ? row.incomeMinor : row.expenseMinor));
+        const parts = filters.kind === 'expense' ? report.flatMap(row => row.categories.map(part =>
+          part.key + ' · ' + row.currency + ' ' + formatMinor(part.amountMinor))) : [];
+        response = 'Total de ' + kind + ' (' + period + '): ' + totals.join(' · ') + '.' +
+          (parts.length ? ' Por categoría: ' + parts.join(' · ') + '.' : '');
       }
     } else {
-      response = 'Puedo resumir tus gastos registrados. Prueba «¿cuánto gasté ayer?» o «transporte este mes».';
+      response = 'Puedo resumir tus ingresos y gastos. Prueba «¿cuánto ingresó este mes?» o «compara mis ingresos y gastos».';
     }
+    const action = parsed.action === 'register' ? 'register' : filters ? 'analysis' : null;
     await this.db.query(
-      'INSERT INTO chat_turns (session_id,question,answer,filters) ' +
-      'SELECT id,$3,$4,$5 FROM chat_sessions WHERE id=$1 AND account_id=$2',
-      [session, account, message, response, filters ? JSON.stringify(filters) : null],
+      'INSERT INTO chat_turns (session_id,question,answer,filters,ui_action) ' +
+      'SELECT id,$3,$4,$5,$6 FROM chat_sessions WHERE id=$1 AND account_id=$2',
+      [session, account, message, response, filters ? JSON.stringify(filters) : null, action],
     );
-    return { answer: response };
+    return { answer: response, action,
+      range: filters?.from && filters.to ? { from: filters.from, to: filters.to, currency: filters.currency } : null };
   }
 
   private async assertChat(account: string, session: string) {
@@ -142,8 +166,8 @@ export function localIntent(question: string): z.infer<typeof intent> {
     /mes (pasado|anterior)/.test(text) ? 'last_month' : text.includes('semana') ? 'week' :
     text.includes('mes') ? 'month' : /historico|todo el historial|todos los gastos/.test(text) ? 'all' : 'inherit';
   const action = /\b(?:registra|registrar|anota|agrega|agregar|pague|compre|gaste)\b.*\d/.test(text) && !text.includes('cuanto') ||
-    /\b(?:registra|registrar|anota|agrega|agregar)\b.*\b(?:gasto|pago|compra)\b/.test(text)
-    ? 'register' : categoryName || date || period !== 'inherit' || /cuanto|total|resumen|gastos/.test(text) ? 'summary' : 'unknown';
+    /\b(?:registra|registrar|anota|agrega|agregar)\b.*\b(?:gasto|pago|compra|ingreso|movimiento)\b/.test(text)
+    ? 'register' : categoryName || date || period !== 'inherit' || chatKind(text) || /cuanto|total|resumen/.test(text) ? 'summary' : 'unknown';
   return { action, period, category: categoryName, date: date && day.safeParse(date).success ? date : null };
 }
 
@@ -169,6 +193,16 @@ function chatFilters(parsed: z.infer<typeof intent>, previous?: Filters): Filter
 }
 
 function formatMinor(amount: string) {
-  const cents = BigInt(amount);
-  return new Intl.NumberFormat('es-CO').format(cents / 100n) + ',' + (cents % 100n).toString().padStart(2, '0');
+  const value = BigInt(amount);
+  const cents = value < 0n ? -value : value;
+  return (value < 0n ? '−' : '') + new Intl.NumberFormat('es-CO').format(cents / 100n) + ',' +
+    (cents % 100n).toString().padStart(2, '0');
+}
+
+function chatKind(question: string): ChatFilters['kind'] {
+  const text = normalize(question);
+  const income = /\b(?:ingres\w*|recibi\w*|entradas|abonos)\b/.test(text);
+  const expense = /\b(?:gast\w*|egres\w*|salidas|pague)\b/.test(text);
+  if ((income && expense) || /\bbalance\b/.test(text) || (!income && !expense && /\bcompara\w*\b/.test(text))) return 'comparison';
+  return income ? 'income' : expense ? 'expense' : undefined;
 }

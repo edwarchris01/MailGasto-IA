@@ -10,9 +10,12 @@ import 'package:timezone/data/latest.dart' as tz;
 import 'core/api.dart';
 import 'core/widgets.dart';
 import 'features/auth/auth.dart';
+import 'features/auth/profile.dart';
 import 'features/chat/chat.dart';
+import 'features/expenses/finance.dart';
+import 'features/expenses/finance_screens.dart';
 import 'features/expenses/history_screen.dart';
-import 'features/expenses/home_screen.dart';
+import 'features/expenses/movements_screen.dart';
 import 'features/mailboxes/mailboxes.dart';
 
 void main() {
@@ -30,13 +33,22 @@ final routerProvider = Provider((ref) {
       if (auth.isLoading || auth.hasError) {
         return path == '/loading' ? null : '/loading';
       }
-      final public = path == '/login' || path == '/register';
-      if (auth.asData?.value == null) return public ? null : '/login';
-      return public || path == '/loading' ? '/home' : null;
+      final access = path == '/login' || path == '/register';
+      final recovery = path == '/recover' || path == '/reset';
+      if (auth.asData?.value == null) {
+        return access || recovery ? null : '/login';
+      }
+      return access || path == '/loading' ? '/home' : null;
     },
     routes: [
       GoRoute(path: '/loading', builder: (_, _) => const _SessionScreen()),
       GoRoute(path: '/login', builder: (_, _) => const AuthScreen()),
+      GoRoute(path: '/recover', builder: (_, _) => const RecoverScreen()),
+      GoRoute(
+        path: '/reset',
+        builder: (_, state) =>
+            PasswordScreen(reset: true, token: state.extra as String?),
+      ),
       GoRoute(
         path: '/register',
         builder: (_, _) => const AuthScreen(register: true),
@@ -46,31 +58,67 @@ final routerProvider = Provider((ref) {
         branches: [
           StatefulShellBranch(
             routes: [
-              GoRoute(path: '/home', builder: (_, _) => const HomeScreen()),
+              GoRoute(
+                path: '/home',
+                builder: (_, _) => const FinanceScreen(home: true),
+              ),
             ],
           ),
           StatefulShellBranch(
             routes: [
               GoRoute(
                 path: '/history',
-                builder: (_, state) {
-                  final values = state.uri.queryParameters;
-                  return HistoryScreen(
-                    filters: (
-                      from: values['from'],
-                      to: values['to'],
-                      category: values['category'],
-                      status: values['status'],
-                    ),
-                  );
-                },
+                builder: (_, state) =>
+                    MovementsScreen(state.uri.queryParameters),
                 routes: [
+                  GoRoute(
+                    path: 'new',
+                    builder: (_, state) => MovementForm(
+                      direction: state.uri.queryParameters['direction'],
+                      currency: state.uri.queryParameters['currency'],
+                    ),
+                  ),
+                  GoRoute(
+                    path: 'movement/:id',
+                    builder: (_, state) =>
+                        MovementScreen(state.pathParameters['id']!),
+                    routes: [
+                      GoRoute(
+                        path: 'edit',
+                        builder: (_, state) => MovementScreen(
+                          state.pathParameters['id']!,
+                          editing: true,
+                        ),
+                      ),
+                    ],
+                  ),
                   GoRoute(
                     path: ':id',
                     builder: (_, state) =>
                         NoticeScreen(state.pathParameters['id']!),
                   ),
                 ],
+              ),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: '/analysis',
+                builder: (_, state) {
+                  final values = state.uri.queryParameters;
+                  final defaults = currentRange();
+                  return FinanceScreen(
+                    key: ValueKey(state.uri),
+                    initial: (
+                      from: values['from'] ?? defaults.from,
+                      to: values['to'] ?? defaults.to,
+                      currency: currencies.containsKey(values['currency'])
+                          ? values['currency']!
+                          : defaults.currency,
+                    ),
+                  );
+                },
               ),
             ],
           ),
@@ -86,11 +134,26 @@ final routerProvider = Provider((ref) {
             routes: [
               GoRoute(
                 path: '/settings',
-                builder: (_, _) => const _SettingsScreen(),
+                builder: (_, _) => const ProfileScreen(),
                 routes: [
                   GoRoute(
                     path: 'mailboxes',
                     builder: (_, _) => const MailboxesScreen(),
+                  ),
+                  GoRoute(
+                    path: 'security',
+                    builder: (_, _) => const SecurityScreen(),
+                    routes: [
+                      GoRoute(
+                        path: 'password',
+                        builder: (_, _) => const PasswordScreen(),
+                      ),
+                      GoRoute(
+                        path: 'delete',
+                        builder: (_, state) =>
+                            DeleteAccountScreen(state.extra as String?),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -119,6 +182,7 @@ class _MailGastoAppState extends ConsumerState<MailGastoApp> {
   Uri? _pending;
   bool _processing = false;
   String? _lastReceipt;
+  String? _pendingDeletion;
 
   @override
   void initState() {
@@ -128,7 +192,12 @@ class _MailGastoAppState extends ConsumerState<MailGastoApp> {
       if (link.scheme != 'https' ||
           link.userInfo.isNotEmpty ||
           link.origin != origin.origin ||
-          link.path != '/mobile/gmail/return' ||
+          !const {
+            '/mobile/gmail/return',
+            '/mobile/auth/google/return',
+            '/mobile/auth/reset',
+            '/mobile/auth/delete',
+          }.contains(link.path) ||
           link.hasQuery) {
         return;
       }
@@ -140,15 +209,48 @@ class _MailGastoAppState extends ConsumerState<MailGastoApp> {
   Future<void> _resumeLink() async {
     if (_pending == null || _processing) return;
     final auth = ref.read(authProvider);
-    if (auth.isLoading) return;
+    if (auth.isLoading || auth.hasError) return;
     final link = _pending!;
     _pending = null;
-    if (auth.asData?.value == null) return;
     final fragment = link.fragment;
+    if (link.path == '/mobile/auth/reset') {
+      final token = RegExp(
+        r'^reset=([A-Za-z0-9_-]{43})$',
+      ).firstMatch(fragment)?.group(1);
+      ref.read(routerProvider).go('/reset', extra: token);
+      return;
+    }
+    if (link.path == '/mobile/auth/delete') {
+      _pendingDeletion = RegExp(
+        r'^delete=([A-Za-z0-9_-]{43})$',
+      ).firstMatch(fragment)?.group(1);
+      if (_pendingDeletion == null) {
+        _messenger.currentState?.showSnackBar(
+          const SnackBar(
+            content: Text('El enlace de eliminación es inválido.'),
+          ),
+        );
+      } else if (auth.asData?.value == null) {
+        ref.read(routerProvider).go('/login');
+        _messenger.currentState?.showSnackBar(
+          const SnackBar(
+            content: Text('Inicia sesión para confirmar la eliminación.'),
+          ),
+        );
+      } else {
+        _openDeletion();
+      }
+      return;
+    }
     final receipt = RegExp(
       r'^receipt=([A-Za-z0-9_-]{43})$',
     ).firstMatch(fragment)?.group(1);
     final cancelled = fragment == 'status=cancelled';
+    if (link.path == '/mobile/auth/google/return') {
+      if (auth.asData?.value == null) await _resumeGoogle(fragment, receipt);
+      return;
+    }
+    if (auth.asData?.value == null) return;
     if ((!cancelled && receipt == null) ||
         (receipt != null && receipt == _lastReceipt)) {
       return;
@@ -179,6 +281,38 @@ class _MailGastoAppState extends ConsumerState<MailGastoApp> {
     if (_pending != null) unawaited(_resumeLink());
   }
 
+  void _openDeletion() {
+    final token = _pendingDeletion;
+    if (token == null || ref.read(authProvider).asData?.value == null) return;
+    _pendingDeletion = null;
+    ref.read(routerProvider).go('/settings/security/delete', extra: token);
+  }
+
+  Future<void> _resumeGoogle(String fragment, String? receipt) async {
+    if (receipt == _lastReceipt && receipt != null) return;
+    final auth = ref.read(authProvider.notifier);
+    _processing = true;
+    try {
+      if (receipt == null) {
+        await auth.cancelGoogle();
+        throw ApiFailure(
+          fragment == 'status=cancelled'
+              ? 'Se canceló el acceso con Google.'
+              : 'Google no pudo iniciar sesión. Vuelve a intentar o usa tu correo.',
+        );
+      }
+      await auth.finishGoogle(receipt);
+      _lastReceipt = receipt;
+    } catch (error) {
+      _messenger.currentState?.showSnackBar(
+        SnackBar(content: Text(failureMessage(error))),
+      );
+    } finally {
+      _processing = false;
+    }
+    if (mounted && _pending != null) unawaited(_resumeLink());
+  }
+
   @override
   void dispose() {
     unawaited(_links?.cancel());
@@ -190,15 +324,19 @@ class _MailGastoAppState extends ConsumerState<MailGastoApp> {
     ref.listen(authProvider, (_, next) {
       if (next.hasValue) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) unawaited(_resumeLink());
+          if (mounted) {
+            _openDeletion();
+            unawaited(_resumeLink());
+          }
         });
       }
     });
-    final colors = ColorScheme.fromSeed(seedColor: const Color(0xFF14532D))
+    final colors = ColorScheme.fromSeed(seedColor: const Color(0xFF2945DB))
         .copyWith(
-          primary: const Color(0xFF14532D),
+          primary: const Color(0xFF2945DB),
           onPrimary: Colors.white,
-          surface: const Color(0xFFF7F9F7),
+          surface: const Color(0xFFF5F7FF),
+          onSurface: const Color(0xFF111A40),
         );
     return MaterialApp.router(
       title: 'MailGasto IA',
@@ -212,8 +350,20 @@ class _MailGastoAppState extends ConsumerState<MailGastoApp> {
         useMaterial3: true,
         colorScheme: colors,
         scaffoldBackgroundColor: colors.surface,
+        cardTheme: const CardThemeData(
+          color: Colors.white,
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.all(Radius.circular(18)),
+            side: BorderSide(color: Color(0xFFE0E5F2)),
+          ),
+        ),
         inputDecorationTheme: const InputDecorationTheme(
-          border: OutlineInputBorder(),
+          filled: true,
+          fillColor: Colors.white,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.all(Radius.circular(12)),
+          ),
         ),
       ),
     );
@@ -244,6 +394,10 @@ class _MainMenu extends StatelessWidget {
   Widget build(BuildContext context) => Scaffold(
     body: shell,
     bottomNavigationBar: NavigationBar(
+      backgroundColor: Colors.white,
+      labelBehavior: MediaQuery.textScalerOf(context).scale(16) > 21
+          ? NavigationDestinationLabelBehavior.onlyShowSelected
+          : NavigationDestinationLabelBehavior.alwaysShow,
       selectedIndex: shell.currentIndex,
       onDestinationSelected: (index) =>
           shell.goBranch(index, initialLocation: index == shell.currentIndex),
@@ -254,52 +408,19 @@ class _MainMenu extends StatelessWidget {
           label: 'Inicio',
         ),
         NavigationDestination(
-          icon: Icon(Icons.receipt_long_outlined),
-          label: 'Historial',
+          icon: Icon(Icons.swap_horiz),
+          label: 'Movimientos',
         ),
+        NavigationDestination(icon: Icon(Icons.bar_chart), label: 'Análisis'),
         NavigationDestination(
           icon: Icon(Icons.chat_bubble_outline),
           label: 'Asistente',
         ),
         NavigationDestination(
-          icon: Icon(Icons.settings_outlined),
-          label: 'Configuración',
+          icon: Icon(Icons.person_outline),
+          label: 'Perfil',
         ),
       ],
     ),
   );
-}
-
-class _SettingsScreen extends ConsumerWidget {
-  const _SettingsScreen();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final account = ref.watch(authProvider).asData?.value;
-    return Scaffold(
-      appBar: AppBar(title: const Text('Configuración')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          if (account != null)
-            ListTile(
-              title: Text(account.name),
-              subtitle: Text(account.email),
-              leading: const Icon(Icons.person_outline),
-            ),
-          ListTile(
-            leading: const Icon(Icons.mail_outline),
-            title: const Text('Buzones'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => context.go('/settings/mailboxes'),
-          ),
-          ListTile(
-            leading: const Icon(Icons.logout),
-            title: const Text('Cerrar sesión'),
-            onTap: () => ref.read(authProvider.notifier).logout(),
-          ),
-        ],
-      ),
-    );
-  }
 }

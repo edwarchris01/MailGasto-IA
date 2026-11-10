@@ -149,6 +149,16 @@ action($('verify'), 'submit', async () => {
   $('verify').hidden = true;
   flash('Correo verificado. Ya puedes iniciar sesión.');
 });
+action($('reset-password'), 'submit', async () => {
+  const form = $('reset-password');
+  const { password, confirmation } = formValues(form);
+  if (password !== confirmation) throw new Error('Las contraseñas deben coincidir.');
+  await api('auth/password/reset/confirm', 'POST', { token: fragment.get('reset'), password });
+  form.reset();
+  form.hidden = true;
+  $('access').hidden = false;
+  flash('Contraseña actualizada. Ya puedes iniciar sesión.');
+});
 action($('logout'), 'click', async () => { await api('auth/logout', 'POST'); location.reload(); });
 action($('link'), 'click', () => authorize());
 action($('link-existing'), 'click', async () => { await api('mailboxes/gmail/existing', 'POST'); await loadMailboxes(); });
@@ -176,4 +186,9 @@ action($('delete-confirm'), 'click', async () => {
 if (fragment.has('verify')) $('verify').hidden = false;
 if (fragment.get('gmail') === 'linked') flash('Gmail vinculado.');
 if (fragment.get('gmail') === 'cancelled') flash('Se canceló la vinculación de Gmail.');
-api('auth/me').then(workspace).catch(() => {});
+if (fragment.has('reset')) {
+  $('access').hidden = true;
+  $('reset-password').hidden = false;
+} else {
+  api('auth/me').then(workspace).catch(() => {});
+}

@@ -31,9 +31,14 @@ class StatusBadge extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final pending = status == 'pending';
+    final error = status == 'error';
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: pending ? const Color(0xFFFDE68A) : colors.secondaryContainer,
+        color: pending
+            ? const Color(0xFFFFF1D8)
+            : error
+            ? const Color(0xFFFDEDEB)
+            : colors.secondaryContainer,
         borderRadius: BorderRadius.circular(16),
       ),
       child: Padding(
@@ -42,7 +47,9 @@ class StatusBadge extends StatelessWidget {
           noticeStatuses[status] ?? 'Estado desconocido',
           style: TextStyle(
             color: pending
-                ? const Color(0xFF78350F)
+                ? const Color(0xFF8A4B08)
+                : error
+                ? const Color(0xFFB42318)
                 : colors.onSecondaryContainer,
             fontWeight: FontWeight.w600,
           ),

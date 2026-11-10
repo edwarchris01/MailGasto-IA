@@ -1,13 +1,15 @@
 import {
   Body, Controller, Delete, ForbiddenException, Get, Headers, HttpCode, Inject,
-  Param, Post, Query, Req, Res, UnauthorizedException,
+  Param, Patch, Post, Query, Req, Res, UnauthorizedException,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
-import { Accounts, input, loginInput, registerInput, sessionHash, tokenInput, uuid } from './accounts.js';
+import { Accounts, input, loginInput, normalizedEmail, registerInput, sessionHash, tokenInput, uuid } from './accounts.js';
 import { CONFIG, Config, equalSecret } from './config.js';
 import { Database } from './db.js';
 import { Gmail } from './gmail.js';
+import { analyticsInput, Finance, manualInput, movementFilters } from './finance.js';
+import { GoogleSignin } from './google-signin.js';
 import { gmailResult, GmailResults } from './gmail-results.js';
 import { chatInput, filtersSchema, History, historySchema } from './history.js';
 
@@ -18,6 +20,8 @@ export class Api {
     @Inject(History) private readonly history: History, @Inject(Database) private readonly db: Database,
     @Inject(CONFIG) private readonly config: Config,
     @Inject(GmailResults) private readonly gmailResults: GmailResults,
+    @Inject(Finance) private readonly finance: Finance,
+    @Inject(GoogleSignin) private readonly google: GoogleSignin,
   ) {}
 
   @Get('health')
@@ -61,6 +65,83 @@ export class Api {
   @Get('auth/me')
   me(@Req() req: Request) {
     return this.accounts.current(req);
+  }
+
+  @Post('auth/password/reset')
+  @HttpCode(202)
+  async resetRequest(@Req() req: Request, @Body() body: unknown) {
+    const { email } = input(z.object({ email: normalizedEmail }), body);
+    await this.accounts.throttle('reset-ip:' + req.ip, 25, 3600);
+    await this.accounts.throttle('reset-email:' + email, 6, 3600);
+    await this.accounts.requestReset(email);
+    return { message: 'Si el correo está asociado a una cuenta, recibirás un enlace.' };
+  }
+
+  @Post('auth/password/reset/confirm')
+  @HttpCode(204)
+  async resetPassword(@Req() req: Request, @Body() body: unknown) {
+    await this.accounts.throttle('reset-confirm:' + req.ip, 30, 600);
+    const values = input(tokenInput.extend({ password: registerInput.shape.password }), body);
+    await this.accounts.resetPassword(values.token, values.password);
+  }
+
+  @Patch('account/profile')
+  async profile(@Req() req: Request, @Body() body: unknown) {
+    const account = await this.accounts.current(req);
+    const { name } = input(registerInput.pick({ name: true }), body);
+    return this.accounts.rename(account.id, name);
+  }
+
+  @Post('account/password')
+  @HttpCode(204)
+  async password(@Req() req: Request, @Body() body: unknown) {
+    const account = await this.accounts.current(req);
+    await this.accounts.throttle('change-password:' + account.id, 10, 900);
+    const values = input(z.object({
+      current: registerInput.shape.password, password: registerInput.shape.password,
+    }), body);
+    await this.accounts.changePassword(account.id, sessionHash(req), values.current, values.password);
+  }
+
+  @Post('mobile/auth/google/authorize')
+  @HttpCode(200)
+  async googleAuthorize(@Req() req: Request, @Body() body: unknown) {
+    const { challenge } = input(z.object({ challenge: tokenInput.shape.token }), body);
+    await this.accounts.throttle('google-auth:' + req.ip, 40, 600);
+    return { url: await this.google.authorize(challenge) };
+  }
+
+  @Get('mobile/auth/google/callback')
+  async googleCallback(@Query() query: unknown, @Res() res: Response) {
+    const params = input(z.object({
+      code: z.string().min(1).max(4096).optional(), state: tokenInput.shape.token,
+    }), query);
+    let fragment: string;
+    let message: string;
+    try {
+      const receipt = await this.google.receive(params.state, params.code);
+      fragment = receipt ? 'receipt=' + receipt : 'status=cancelled';
+      message = receipt ? 'Regresa a MailGasto para iniciar sesión.' : 'Se canceló el inicio de sesión con Google.';
+    } catch {
+      fragment = 'status=failed';
+      message = 'Google no pudo iniciar sesión. Puedes volver a MailGasto y acceder con tu correo.';
+    }
+    const link = this.config.origin + '/mobile/auth/google/return#' + fragment;
+    return res.set('Referrer-Policy', 'no-referrer').type('html').send(
+      '<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width">' +
+      '<title>MailGasto IA</title><main><h1>MailGasto IA</h1><p>' + message +
+      '</p><p><a href="' + link + '">Volver a MailGasto</a></p></main></html>',
+    );
+  }
+
+  @Post('mobile/auth/google/complete')
+  @HttpCode(200)
+  async googleComplete(@Req() req: Request, @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
+    await this.accounts.throttle('google-complete:' + req.ip, 40, 600);
+    const { receipt, verifier } = input(z.object({
+      receipt: tokenInput.shape.token, verifier: tokenInput.shape.token,
+    }), body);
+    return this.google.complete(receipt, verifier, res);
   }
 
   @Post('account/deletion')
@@ -161,6 +242,42 @@ export class Api {
   @Get('summary')
   async summary(@Req() req: Request, @Query() query: unknown) {
     return this.history.summary((await this.accounts.current(req)).id, input(filtersSchema, query));
+  }
+
+  @Get('analytics')
+  async analytics(@Req() req: Request, @Query() query: unknown) {
+    return this.finance.analytics((await this.accounts.current(req)).id, input(analyticsInput, query));
+  }
+
+  @Get('movements')
+  async movements(@Req() req: Request, @Query() query: unknown) {
+    return this.finance.list((await this.accounts.current(req)).id, input(movementFilters, query));
+  }
+
+  @Get('movements/:id')
+  async movement(@Req() req: Request, @Param('id') id: string) {
+    return this.finance.detail((await this.accounts.current(req)).id, input(uuid, id));
+  }
+
+  @Post('movements')
+  async addMovement(@Req() req: Request, @Body() body: unknown) {
+    const owner = await this.accounts.current(req);
+    const requestId = input(z.object({ requestId: uuid }), body).requestId;
+    return this.finance.add(owner.id, requestId, input(manualInput, body));
+  }
+
+  @Patch('movements/:id')
+  @HttpCode(204)
+  async editMovement(@Req() req: Request, @Param('id') id: string, @Body() body: unknown) {
+    const owner = await this.accounts.current(req);
+    await this.finance.edit(owner.id, input(uuid, id), input(manualInput, body));
+  }
+
+  @Delete('movements/:id')
+  @HttpCode(204)
+  async deleteMovement(@Req() req: Request, @Param('id') id: string) {
+    const owner = await this.accounts.current(req);
+    await this.finance.remove(owner.id, input(uuid, id));
   }
 
   @Get('chat/sessions')

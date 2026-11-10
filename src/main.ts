@@ -12,6 +12,8 @@ import { CONFIG, Config, readConfig } from './config.js';
 import { Database } from './db.js';
 import { Gmail } from './gmail.js';
 import { GmailResults } from './gmail-results.js';
+import { Finance } from './finance.js';
+import { GoogleSignin } from './google-signin.js';
 import { History } from './history.js';
 import { Worker } from './worker.js';
 
@@ -23,7 +25,7 @@ export async function createApp(config: Config, startWorker = true) {
     module: App,
     controllers: [Api],
     providers: [
-      { provide: CONFIG, useValue: config }, Database, Accounts, Agent, Gmail, GmailResults, History,
+      { provide: CONFIG, useValue: config }, Database, Accounts, Agent, Gmail, GmailResults, History, Finance, GoogleSignin,
       ...(startWorker ? [Worker] : []),
     ],
   }, { bodyParser: false, logger: ['error', 'warn'] });
@@ -55,10 +57,13 @@ export async function createApp(config: Config, startWorker = true) {
       },
     }]);
   });
-  server.get('/mobile/gmail/return', (_req, res) => {
+  server.get(['/mobile/gmail/return', '/mobile/auth/google/return'], (_req, res) => {
     return res.set('Referrer-Policy', 'no-referrer').type('text').send(
       'Abre MailGasto IA en tu dispositivo Android y comprueba que los enlaces compatibles estén habilitados.',
     );
+  });
+  server.get(['/mobile/auth/reset', '/mobile/auth/delete'], (_req, res) => {
+    res.set('Referrer-Policy', 'no-referrer').set('Cache-Control', 'no-store').sendFile(resolve('public/index.html'));
   });
   app.useStaticAssets(resolve('public'), { maxAge: 0, index: 'index.html' });
   await app.get(Database).migrate();

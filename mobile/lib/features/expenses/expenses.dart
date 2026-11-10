@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/api.dart';
 import '../../core/format.dart';
+import '../auth/auth.dart';
 
 typedef HistoryFilters = ({
   String? from,
@@ -11,43 +12,16 @@ typedef HistoryFilters = ({
   String? status,
 });
 typedef DateFilter = ({String from, String to});
-typedef CategoryTotal = ({String category, BigInt minor});
-typedef Summary = ({BigInt total, List<CategoryTotal> breakdown});
 typedef HistoryPage = ({List<Notice> items, int page, bool hasMore});
 
-final expenseRepositoryProvider = Provider(
-  (ref) => ExpenseRepository(ref.watch(apiProvider)),
-);
+final expenseRepositoryProvider = Provider((ref) {
+  ref.watch(authProvider.select((auth) => auth.asData?.value?.id));
+  return ExpenseRepository(ref.watch(apiProvider));
+});
 
 class ExpenseRepository {
   ExpenseRepository(this.api);
   final ApiClient api;
-
-  Future<Summary> summary(DateFilter dates) async {
-    final data = await api.object(
-      'summary',
-      query: {'from': dates.from, 'to': dates.to},
-    );
-    final totals = (data['totals'] as List).cast<Json>();
-    final cop = totals.where((row) => row['currency'] == 'COP').firstOrNull;
-    final breakdown = (data['categories'] as List)
-        .cast<Json>()
-        .where((row) => row['currency'] == 'COP')
-        .map(
-          (row) => (
-            category: row['category'] as String,
-            minor: BigInt.parse(row['amount_minor'] as String),
-          ),
-        )
-        .toList();
-    breakdown.sort((a, b) => b.minor.compareTo(a.minor));
-    return (
-      total: cop == null
-          ? BigInt.zero
-          : BigInt.parse(cop['amount_minor'] as String),
-      breakdown: breakdown,
-    );
-  }
 
   Future<HistoryPage> history(HistoryFilters filters, {int page = 1}) async {
     final data = await api.object(
@@ -57,6 +31,7 @@ class ExpenseRepository {
         'to': ?filters.to,
         'category': ?filters.category,
         'status': ?filters.status,
+        'unregistered': 'true',
         'page': page,
       },
     );
@@ -132,10 +107,6 @@ class Notice {
   }
 }
 
-final summaryProvider = FutureProvider.autoDispose.family<Summary, DateFilter>(
-  (ref, dates) => ref.watch(expenseRepositoryProvider).summary(dates),
-);
-
 final noticeProvider = FutureProvider.autoDispose.family<Notice, String>(
   (ref, id) => ref.watch(expenseRepositoryProvider).detail(id),
 );
@@ -197,7 +168,7 @@ Future<DateTimeRange?> pickDates(
 }) => showDateRangePicker(
   context: context,
   firstDate: DateTime(2000),
-  lastDate: DateTime(bogotaNow().year + 1),
+  lastDate: bogotaNow(),
   initialDateRange: initial,
   currentDate: bogotaNow(),
   helpText: 'Selecciona el periodo',

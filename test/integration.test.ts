@@ -84,7 +84,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
     assert.equal((await request('auth/register', 'POST', { name: 'Persona de prueba', email, password })).status, 202);
     assert.equal((await request('auth/login', 'POST', { email, password })).status, 403);
     for (let count = 0; count < 5; count++) if (!await worker.sendOne()) break;
-    const inbox = 'http://localhost:8026/api/v1/';
+    const inbox = (process.env.MAILGASTO_TEST_MAILPIT_URL ?? 'http://localhost:8026') + '/api/v1/';
     let summary;
     for (let attempt = 0; attempt < 12 && !summary; attempt++) {
       const response = await fetch(inbox + 'search?query=' + encodeURIComponent('to:' + email));

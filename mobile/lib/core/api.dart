@@ -129,3 +129,15 @@ class ApiClient {
 String failureMessage(Object error) => error is ApiFailure
     ? error.message
     : 'No pudimos cargar la información. Intenta de nuevo.';
+
+Uri googleAuthorizationUrl(Json result) {
+  final uri = Uri.parse(result['url'] as String);
+  if (uri.scheme != 'https' ||
+      uri.host != 'accounts.google.com' ||
+      uri.hasPort ||
+      uri.userInfo.isNotEmpty ||
+      uri.path != '/o/oauth2/v2/auth') {
+    throw const ApiFailure('No pudimos abrir la autorización de Google.');
+  }
+  return uri;
+}

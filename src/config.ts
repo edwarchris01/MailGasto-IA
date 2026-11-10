@@ -13,6 +13,8 @@ const settings = z.object({
   N8N_GMAIL_WEBHOOK_URL: z.url({ protocol: /^https?$/ }).optional(),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
+  GOOGLE_SIGNIN_CLIENT_ID: z.string().optional(),
+  GOOGLE_SIGNIN_CLIENT_SECRET: z.string().optional(),
   ANDROID_APP_LINK_SHA256: z.string().regex(/^(?:[A-F0-9]{2}:){31}[A-F0-9]{2}$/i).optional(),
   LEGACY_GMAIL_ADDRESS: z.email().optional(),
   SMTP_URL: z.url({ protocol: /^smtps?$/ }),
@@ -22,6 +24,9 @@ const settings = z.object({
 
 export function readConfig(env: NodeJS.ProcessEnv = process.env) {
   const values = settings.parse(Object.fromEntries(Object.entries(env).filter(([, value]) => value)));
+  if (Boolean(values.GOOGLE_SIGNIN_CLIENT_ID) !== Boolean(values.GOOGLE_SIGNIN_CLIENT_SECRET)) {
+    throw new Error('Configure both GOOGLE_SIGNIN_CLIENT_ID and GOOGLE_SIGNIN_CLIENT_SECRET');
+  }
   const publicUrl = new URL(values.PUBLIC_URL);
   if (publicUrl.pathname !== '/' || publicUrl.search || publicUrl.hash ||
       (publicUrl.protocol !== 'https:' && !['localhost', '127.0.0.1'].includes(publicUrl.hostname))) {

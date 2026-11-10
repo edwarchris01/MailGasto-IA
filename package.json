@@ -17,6 +17,7 @@
     "@nestjs/core": "^11.1.0",
     "@nestjs/platform-express": "^11.1.0",
     "argon2": "^0.44.0",
+    "google-auth-library": "^11.3.4",
     "helmet": "^8.0.0",
     "luxon": "^3.7.0",
     "mailparser": "^3.7.0",

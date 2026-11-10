@@ -29,6 +29,12 @@
     <label>Contraseña que elegiste al registrarte <input type="password" name="password" autocomplete="current-password" required></label>
     <button>Verificar</button>
   </form>
+  <form id="reset-password" hidden><h2>Nueva contraseña</h2>
+    <label>Nueva contraseña <input type="password" name="password" autocomplete="new-password" minlength="12" maxlength="128" required></label>
+    <label>Confirma la contraseña <input type="password" name="confirmation" autocomplete="new-password" minlength="12" maxlength="128" required></label>
+    <button>Guardar contraseña</button>
+    <p>Si tu enlace venció, solicita otro desde la app.</p>
+  </form>
   <section id="workspace" hidden>
     <div class="row"><h2 id="welcome">Tu cuenta</h2><button id="logout">Cerrar sesión</button></div>
     <section>

@@ -1,21 +1,30 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/api.dart';
 import '../../core/format.dart';
 import '../../core/widgets.dart';
+import '../auth/auth.dart';
+import '../expenses/finance.dart';
 
 typedef Conversation = ({String id, String createdAt});
-typedef Turn = ({String question, String answer});
+typedef Turn = ({
+  String question,
+  String answer,
+  String? action,
+  Map<String, String> range,
+});
 typedef ChatState = ({
   List<Conversation> conversations,
   String? selected,
   List<Turn> turns,
 });
 
-final chatRepositoryProvider = Provider(
-  (ref) => ChatRepository(ref.watch(apiProvider)),
-);
+final chatRepositoryProvider = Provider((ref) {
+  ref.watch(authProvider.select((auth) => auth.asData?.value?.id));
+  return ChatRepository(ref.watch(apiProvider));
+});
 final chatProvider =
     AsyncNotifierProvider.autoDispose<ChatViewModel, ChatState>(
       ChatViewModel.new,
@@ -34,23 +43,28 @@ class ChatRepository {
   Future<Conversation> create() async =>
       _conversation(await api.object('chat/sessions', method: 'POST'));
 
-  Future<List<Turn>> turns(String id) async =>
-      (await api.list('chat/sessions/${Uri.encodeComponent(id)}/messages'))
-          .map(
-            (row) => (
-              question: row['question'] as String,
-              answer: row['answer'] as String,
-            ),
-          )
-          .toList();
+  Future<List<Turn>> turns(String id) async => (await api.list(
+    'chat/sessions/${Uri.encodeComponent(id)}/messages',
+  )).map((row) => _turn(row['question'] as String, row)).toList();
 
-  Future<String> send(String id, String message) async =>
-      (await api.object(
-            'chat/sessions/${Uri.encodeComponent(id)}/messages',
-            method: 'POST',
-            body: {'message': message},
-          ))['answer']
-          as String;
+  Future<Turn> send(String id, String message) async => _turn(
+    message,
+    await api.object(
+      'chat/sessions/${Uri.encodeComponent(id)}/messages',
+      method: 'POST',
+      body: {'message': message},
+    ),
+  );
+
+  Turn _turn(String question, Json row) => (
+    question: question,
+    answer: row['answer'] as String,
+    action: row['action'] as String?,
+    range: {
+      for (final entry in ((row['range'] as Json?) ?? const {}).entries)
+        if (entry.value is String) entry.key: entry.value as String,
+    },
+  );
 }
 
 class ChatViewModel extends AsyncNotifier<ChatState> {
@@ -90,12 +104,12 @@ class ChatViewModel extends AsyncNotifier<ChatState> {
       );
       state = AsyncData(current);
     }
-    final answer = await repository.send(selected, question);
+    final turn = await repository.send(selected, question);
     if (ref.mounted) {
       state = AsyncData((
         conversations: current.conversations,
         selected: selected,
-        turns: [...current.turns, (question: question, answer: answer)],
+        turns: [...current.turns, turn],
       ));
     }
   }
@@ -203,22 +217,24 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                           children: [
                             const SizedBox(height: 20),
                             const Text(
-                              'Pregunta por los gastos registrados en tu cuenta.',
+                              'Pregunta por los ingresos y gastos de tu cuenta.',
                             ),
                             const SizedBox(height: 12),
-                            Align(
-                              alignment: Alignment.centerLeft,
-                              child: ActionChip(
-                                label: const Text(
+                            Wrap(
+                              spacing: 8,
+                              children: [
+                                for (final prompt in const [
+                                  '¿Cuánto ingresó este mes?',
+                                  'Compara mis ingresos y gastos',
                                   '¿Cuánto gasté en alimentación este mes?',
-                                ),
-                                onPressed: _busy
-                                    ? null
-                                    : () {
-                                        _input.text =
-                                            '¿Cuánto gasté en alimentación este mes?';
-                                      },
-                              ),
+                                ])
+                                  ActionChip(
+                                    label: Text(prompt),
+                                    onPressed: _busy
+                                        ? null
+                                        : () => _input.text = prompt,
+                                  ),
+                              ],
                             ),
                           ],
                         )
@@ -241,7 +257,32 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                                 Card(
                                   child: Padding(
                                     padding: const EdgeInsets.all(14),
-                                    child: Text(turn.answer),
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(turn.answer),
+                                        if (turn.action == 'register')
+                                          TextButton(
+                                            onPressed: () =>
+                                                context.push('/history/new'),
+                                            child: const Text(
+                                              'Registrar movimiento',
+                                            ),
+                                          ),
+                                        if (turn.action == 'analysis' &&
+                                            turn.range.isNotEmpty)
+                                          TextButton(
+                                            onPressed: () => context.go(
+                                              financePath(
+                                                '/analysis',
+                                                turn.range,
+                                              ),
+                                            ),
+                                            child: const Text('Ver análisis'),
+                                          ),
+                                      ],
+                                    ),
                                   ),
                                 ),
                                 const SizedBox(height: 10),

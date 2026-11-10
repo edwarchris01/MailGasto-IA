@@ -34,6 +34,9 @@
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="https" android:host="${mailgastoAppLinkHost}"
                     android:path="/mobile/gmail/return"/>
+                <data android:path="/mobile/auth/google/return"/>
+                <data android:path="/mobile/auth/reset"/>
+                <data android:path="/mobile/auth/delete"/>
             </intent-filter>
         </activity>
         <!-- Don't delete the meta-data below.

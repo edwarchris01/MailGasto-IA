@@ -17,12 +17,13 @@ String syncLabel(String value) =>
     );
 
 String money(BigInt minor, String currency) {
-  final units = (minor ~/ BigInt.from(100)).toString().replaceAllMapped(
+  final magnitude = minor.abs();
+  final units = (magnitude ~/ BigInt.from(100)).toString().replaceAllMapped(
     RegExp(r'\B(?=(\d{3})+(?!\d))'),
     (_) => '.',
   );
-  final cents = (minor % BigInt.from(100)).toString().padLeft(2, '0');
-  return '$currency $units,$cents';
+  final cents = (magnitude % BigInt.from(100)).toString().padLeft(2, '0');
+  return '${minor.isNegative ? '− ' : ''}$currency $units,$cents';
 }
 
 const categories = {

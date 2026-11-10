@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../core/api.dart';
 import '../../core/format.dart';
 import '../../core/widgets.dart';
+import '../auth/auth.dart';
 
 typedef Mailbox = ({
   String id,
@@ -15,9 +16,10 @@ typedef Mailbox = ({
   String? syncedAt,
 });
 
-final mailboxRepositoryProvider = Provider(
-  (ref) => MailboxRepository(ref.watch(apiProvider)),
-);
+final mailboxRepositoryProvider = Provider((ref) {
+  ref.watch(authProvider.select((auth) => auth.asData?.value?.id));
+  return MailboxRepository(ref.watch(apiProvider));
+});
 final mailboxesProvider = FutureProvider.autoDispose(
   (ref) => ref.watch(mailboxRepositoryProvider).list(),
 );
@@ -44,15 +46,7 @@ class MailboxRepository {
       method: 'POST',
       body: {'mailboxId': ?id},
     );
-    final uri = Uri.parse(result['url'] as String);
-    if (uri.scheme != 'https' ||
-        uri.host != 'accounts.google.com' ||
-        uri.hasPort ||
-        uri.userInfo.isNotEmpty ||
-        uri.path != '/o/oauth2/v2/auth') {
-      throw const ApiFailure('No pudimos abrir la autorización de Google.');
-    }
-    return uri;
+    return googleAuthorizationUrl(result);
   }
 
   Future<void> complete(String receipt) => api.request(
@@ -64,8 +58,12 @@ class MailboxRepository {
   Future<void> reconnectExisting() =>
       api.request('mailboxes/gmail/existing', method: 'POST');
 
-  Future<void> disconnect(String id) =>
-      api.request('mailboxes/${Uri.encodeComponent(id)}', method: 'DELETE');
+  Future<bool> disconnect(String id) async =>
+      (await api.object(
+        'mailboxes/${Uri.encodeComponent(id)}',
+        method: 'DELETE',
+      ))['providerRevoked'] ==
+      true;
 }
 
 class MailboxesScreen extends ConsumerStatefulWidget {
@@ -141,8 +139,18 @@ class _MailboxesScreenState extends ConsumerState<MailboxesScreen> {
       ),
     );
     if (accepted != true || !mounted) return;
-    await ref.read(mailboxRepositoryProvider).disconnect(mailbox.id);
-    if (mounted) ref.invalidate(mailboxesProvider);
+    final revoked = await ref
+        .read(mailboxRepositoryProvider)
+        .disconnect(mailbox.id);
+    if (mounted) {
+      ref.invalidate(mailboxesProvider);
+      showMessage(
+        context,
+        revoked
+            ? 'Buzón desvinculado.'
+            : 'Buzón desvinculado. Revoca también el permiso desde tu cuenta de Google.',
+      );
+    }
   });
 
   @override
@@ -248,7 +256,19 @@ class _MailboxesScreenState extends ConsumerState<MailboxesScreen> {
           FilledButton.icon(
             onPressed: _busy ? null : _authorize,
             icon: const Icon(Icons.add_link),
-            label: const Text('Vincular cuenta'),
+            label: const Text('Vincular Gmail'),
+          ),
+          const ListTile(
+            leading: Icon(Icons.shield_outlined),
+            title: Text('Acceso de solo lectura'),
+            subtitle: Text(
+              'Identificamos los avisos bancarios del buzón autorizado.',
+            ),
+          ),
+          const ListTile(
+            leading: Icon(Icons.mail_outline),
+            title: Text('Outlook'),
+            subtitle: Text('Próximamente'),
           ),
         ],
       ),
