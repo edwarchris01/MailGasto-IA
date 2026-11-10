@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { candidate, resolveExtraction } from '../src/extraction.js';
 import { localIntent } from '../src/history.js';
+import { readGmailModel, resolveGmailExtraction } from '../src/mail-rules.js';
 
 const senders = { 'alertas@nequi.example': 'nequi', '@bancolombia.example': 'bancolombia' } as const;
 const sample = 'Pagaste COP 25.000 en Restaurante Demo el 10/11/2026.';
@@ -24,20 +25,28 @@ test('recognizes notices and identifiable forwards and removes sensitive materia
     'Nota personal\n---------- Mensaje reenviado ---------\nDe: Nequi <alertas@nequi.example>\nAsunto: Compra\n\n' +
     sample + secret, senders);
   assert.equal(forwarded?.forwarded, true);
-  assert.match(forwarded?.text ?? '', /25\.000/);
-  assert.doesNotMatch(forwarded?.text ?? '', /Nota personal|12345678901|@demo|https:/);
+  assert.equal(forwarded?.subject, 'Compra');
+  assert.match(forwarded?.body ?? '', /25\.000/);
+  assert.doesNotMatch(forwarded?.body ?? '', /Nota personal|12345678901|@demo|https:/);
 });
 
-test('recognizes completed payments from other senders without registering them', () => {
+test('registers confirmed income from a commerce and discards payment requests and failures', () => {
   const from = 'avisos@comercio.example';
-  const incoming = candidate(from, 'Transferencia recibida', 'Te abonaron COP 1.200 el 10/11/2026.', senders);
+  const incoming = candidate(from, 'Transferencia recibida', 'Te abonaron 1.200 el 10/11/2026 con Nequi.', senders);
   assert.equal(incoming?.provider, 'other');
-  assert.deepEqual(resolveExtraction(incoming!, valid), {
-    status: 'pending', reason: 'unverified_sender', confidence: 0, unconfirmedFields: [],
+  const model = readGmailModel({ ...valid, classification: 'completed', amountMinor: '120000', direction: 'income' });
+  const result = resolveGmailExtraction(incoming!, model);
+  assert.equal(result.status, 'registered');
+  assert.deepEqual(result.movement, {
+    amountMinor: '120000', currency: 'COP', date: '2026-11-10', paymentMethod: 'Nequi',
+    description: 'Ingreso · Nequi', category: 'ingresos', direction: 'income',
   });
+  assert.equal(resolveGmailExtraction(incoming!, null).status, 'error');
   assert.equal(candidate(from, 'Solicitud de pago', 'Paga antes de mañana el saldo de COP 1.200.', senders), null);
   assert.equal(candidate(from, 'Pago cancelado', 'La compra aprobada por COP 1.200 fue cancelada.', senders), null);
-  assert.equal(candidate(from, 'Compra aprobada', 'Compraste un plan.', senders), null);
+  assert.equal(candidate(from, 'Pago de ropa', 'Tu pago no pudo ser procesado.', senders), null);
+  const incomplete = candidate(from, 'Compra aprobada', 'Compraste un plan.', senders);
+  assert.equal(resolveGmailExtraction(incomplete!, model).status, 'pending');
 });
 
 test('requires grounded amount, date, currency, direction, method and threshold', () => {
@@ -81,6 +90,7 @@ test('extracts diverse synthetic notices with explicit evidence', () => {
 test('detects intent and inherited period without allowing chat to create transactions', () => {
   assert.equal(localIntent('Lo de ayer').period, 'yesterday');
   assert.equal(localIntent('¿Y transporte?').category, 'transporte');
+  assert.equal(localIntent('¿Cuánto gasté en ropa este mes?').category, 'compras');
   assert.equal(localIntent('Registra un gasto de 25000').action, 'register');
   assert.equal(localIntent('¿Cuánto gasté el 2026-11-10?').action, 'summary');
 });

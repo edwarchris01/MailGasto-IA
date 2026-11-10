@@ -160,7 +160,8 @@ export class History {
 
 export function localIntent(question: string): z.infer<typeof intent> {
   const text = normalize(question);
-  const categoryName = categories.find(value => text.includes(value)) ?? null;
+  const categoryName = categories.find(value => new RegExp('\\b' + value + '\\b').test(text)) ??
+    (/\b(?:ropa|calzado|vestuario|zapatos)\b/.test(text) ? 'compras' : null);
   const date = text.match(/\b\d{4}-\d{2}-\d{2}\b/)?.[0] ?? null;
   const period = text.includes('ayer') ? 'yesterday' : text.includes('hoy') ? 'today' :
     /mes (pasado|anterior)/.test(text) ? 'last_month' : text.includes('semana') ? 'week' :

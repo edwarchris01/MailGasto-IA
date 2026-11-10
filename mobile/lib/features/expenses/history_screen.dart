@@ -55,8 +55,7 @@ class NoticeScreen extends ConsumerWidget {
                       ),
                     ),
                   ),
-                if (notice.status == 'pending' &&
-                    notice.reason != 'unverified_sender')
+                if (notice.status == 'pending' && notice.provider != 'other')
                   const ListTile(
                     leading: Icon(Icons.forward_to_inbox_outlined),
                     title: Text('Cómo reenviar el aviso'),
@@ -81,7 +80,12 @@ class NoticeScreen extends ConsumerWidget {
                 ),
                 ListTile(
                   title: const Text('Medio de pago'),
-                  subtitle: Text(notice.paymentMethod ?? 'Por confirmar'),
+                  subtitle: Text(
+                    notice.paymentMethod ??
+                        (notice.status == 'registered'
+                            ? 'Sin especificar'
+                            : 'Por confirmar'),
+                  ),
                 ),
                 ListTile(
                   title: const Text('Categoría'),

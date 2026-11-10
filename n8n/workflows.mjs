@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { buildGmailWorkflow, gmailOperations, gmailSdk } from './gmail-workflow.mjs';
+import { categories } from '../src/mail-rules.ts';
 
 const ollama = { id: '84doF8LS0JZLF1T4', name: 'Ollama account 2' };
 const webhookAuth = { name: 'MailGasto Agent Header' };
@@ -20,7 +21,7 @@ const extractionPrompt = [
   'Devuelve un único objeto JSON con estas claves exactas:',
   '{"amountMinor":string|null,"currency":"COP"|"USD"|"EUR"|null,"date":"YYYY-MM-DD"|null,',
   '"paymentMethod":"Nequi"|"Bancolombia"|"Tarjeta"|null,"description":string|null,',
-  '"category":"alimentacion"|"transporte"|"vivienda"|"ocio"|"salud"|"educacion"|"ingresos"|"otros"|null,',
+  '"category":' + categories.map(value => JSON.stringify(value)).join('|') + '|null,',
   '"direction":"expense"|"income"|null,"confidence":number}.',
   'amountMinor es el monto en centavos como cadena de dígitos. Ejemplo: COP 25.000 produce "2500000".',
   'Usa el símbolo $ como COP para estas fuentes si no hay otra moneda explícita. Busca el valor del movimiento, no el saldo.',
@@ -34,7 +35,7 @@ const intentPrompt = [
   'Devuelve solo un objeto JSON con action, period, category y date. Usa estos valores exactos:',
   'action: summary para consultar, register para intentar anotar un gasto, unknown para otras preguntas.',
   'period: today, yesterday, week, month, last_month, all, inherit o null.',
-  'category: alimentacion, transporte, vivienda, ocio, salud, educacion, ingresos, otros o null.',
+  'category: ' + categories.join(', ') + ' o null. Usa compras para ropa y calzado.',
   'date: solo YYYY-MM-DD si el usuario da una fecha completa; de otro modo null.',
   '«Lo de ayer» usa yesterday. «¿Y en transporte?» usa inherit. Nunca inventes cifras ni pidas acceder a otros datos.',
 ].join('\n');
@@ -101,10 +102,21 @@ function sdk(workflow, branches) {
 
 const selection = process.argv[2] ?? 'agent';
 const intake = () => buildGmailWorkflow({ tableId: process.env.MAILGASTO_N8N_TABLE_ID });
+function intakeOperations() {
+  const current = JSON.parse(readFileSync(process.argv[3], 'utf8'));
+  const parameters = name => current.nodes.find(node => node.name === name)?.parameters;
+  const table = parameters('Guardar ID para reintento')?.dataTableId;
+  const senderJson = parameters('Filtrar y proteger aviso')?.jsCode?.match(/^const senders = (.+);$/m)?.[1];
+  return gmailOperations(buildGmailWorkflow({
+    tableId: process.env.MAILGASTO_N8N_TABLE_ID || (['id', 'list'].includes(table?.mode) ? table.value : undefined),
+    senderJson: process.env.BANK_SENDERS_JSON ?? senderJson,
+    resultUrl: process.env.MAILGASTO_RESULTS_URL || parameters('Entregar resultado a NestJS')?.url,
+  }), current);
+}
 const output = {
   agent: () => agent, sdk: () => sdk(agent, [extract, intent]), intake,
   'intake-sdk': () => gmailSdk(intake()),
-  'intake-operations': () => gmailOperations(intake(), JSON.parse(readFileSync(process.argv[3], 'utf8'))),
+  'intake-operations': intakeOperations,
 }[selection]?.();
 if (output === undefined) throw Error('Use agent, sdk, intake, intake-sdk, or intake-operations <current-workflow.json>');
 process.stdout.write(typeof output === 'string' ? output : JSON.stringify(output));

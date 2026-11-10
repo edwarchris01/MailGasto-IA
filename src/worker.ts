@@ -94,7 +94,7 @@ export class Worker implements OnApplicationBootstrap, OnApplicationShutdown {
           result.status === 'pending' ? result.unconfirmedFields : null],
       );
       if (!updated.rowCount) return;
-      await saveNoticeEffects(client, this.config, mailbox.account_id, job.id, result);
+      await saveNoticeEffects(client, this.config, mailbox.account_id, job.id, result, job.provider);
     });
     return true;
   }

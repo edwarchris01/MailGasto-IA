@@ -10,6 +10,7 @@ import { buildGmailWorkflow } from '../n8n/gmail-workflow.mjs';
 import { readConfig } from '../src/config.js';
 import { Database } from '../src/db.js';
 import { createApp } from '../src/main.js';
+import { agaval, agavalSubject, shopSender } from './pipeline.fixture.mjs';
 
 const apiOrigin = 'http://localhost:3116';
 const n8n = 'http://127.0.0.1:5679/webhook';
@@ -111,7 +112,7 @@ async function main() {
   const networkFetch = globalThis.fetch;
   const messages = {
     [`registered-${run}`]: `Pagaste COP 25 en Restaurante QA el ${date} con Nequi. Cuenta 12345678901.`,
-    [`other-${run}`]: `Confirmación de pago. Pagaste COP 3200 en Comercio QA el ${date}.`,
+    [`other-${run}`]: agaval.replace('10/11/2026', today.toFormat('dd/MM/yyyy')),
     [`pending-${run}`]: `Pagaste COP 13.000 y transferiste COP 14.000 el ${date}.`,
     [`ignored-${run}`]: 'Hola, mensaje personal de prueba.',
   };
@@ -142,9 +143,10 @@ async function main() {
       assert.equal(url.searchParams.get('format'), 'raw');
       assert(Object.hasOwn(messages, id));
       const isIgnored = id.startsWith('ignored-');
-      const from = isIgnored ? 'persona@example.test' : id.startsWith('other-') ? 'avisos@comercio.example' : sender;
+      const isShop = id.startsWith('other-');
+      const from = isIgnored ? 'persona@example.test' : isShop ? shopSender : sender;
       const raw = `From: ${from}\r\nTo: ${email}\r\n` +
-        `Subject: ${isIgnored ? 'Saludos' : 'Aviso de pago'}\r\nMIME-Version: 1.0\r\n` +
+        `Subject: ${isIgnored ? 'Saludos' : isShop ? agavalSubject : 'Aviso de pago'}\r\nMIME-Version: 1.0\r\n` +
         `Content-Type: text/plain; charset=UTF-8\r\n\r\n${messages[id]}`;
       return Response.json({ id, raw: Buffer.from(raw).toString('base64url'), internalDate: String(receivedAt), labelIds: ['INBOX'] });
     }
@@ -185,7 +187,8 @@ async function main() {
     assert.equal((await request(`mailboxes/gmail/callback?code=synthetic-grant&state=${link.searchParams.get('state')}`, undefined, cookie)).status, 303);
     const deliveries = await waitFor('cuatro entregas cerradas por el webhook de n8n', async () => {
       const { rows } = await db.query(
-        'SELECT d.message_id, n.status, n.provider, n.reason, t.amount_minor, t.currency, d.attempts FROM gmail_deliveries d ' +
+        'SELECT d.message_id, n.status, n.provider, n.reason, t.amount_minor, t.currency, t.category, ' +
+        't.payment_method, t.direction, t.description, d.attempts FROM gmail_deliveries d ' +
         'JOIN mailboxes m ON m.id=d.mailbox_id LEFT JOIN notices n ON n.mailbox_id=m.id AND n.message_id=d.message_id ' +
         'LEFT JOIN transactions t ON t.notice_id=n.id WHERE m.email=$1 AND d.completed_at IS NOT NULL ORDER BY d.message_id', [email],
       );
@@ -193,7 +196,9 @@ async function main() {
     }, 180);
     const [ignored, other, ambiguous, registered] = deliveries;
     assert.equal(ignored.status, null);
-    assert.deepEqual([other.status, other.provider, other.reason, other.amount_minor], ['pending', 'other', 'unverified_sender', null]);
+    assert.deepEqual([other.status, other.provider, other.amount_minor, other.currency, other.category, other.payment_method, other.direction],
+      ['registered', 'other', '5000000', 'COP', 'compras', null, 'expense']);
+    assert.match(other.description, /agaval/i);
     assert(['pending', 'error'].includes(ambiguous.status), 'Un aviso ambiguo no debe registrarse');
     assert.equal(ambiguous.amount_minor, null);
     assert.deepEqual([registered.status, registered.amount_minor, registered.currency], ['registered', '2500', 'COP']);
@@ -201,7 +206,7 @@ async function main() {
     const mailCount = await waitFor('notificaciones SMTP para aviso registrado y pendiente', async () => {
       const { rows } = await db.query("SELECT o.subject FROM outbox o JOIN accounts a ON a.id=o.account_id " +
         "WHERE a.email=$1 AND o.status='sent' ORDER BY o.subject", [email]);
-      if (rows.length === (ambiguous.status === 'pending' ? 3 : 2)) return rows.map(row => row.subject);
+      if (rows.length === (ambiguous.status === 'pending' ? 4 : 3)) return rows.map(row => row.subject);
     });
     assert(mailCount.some(subject => subject.includes('Movimiento registrado')));
     if (ambiguous.status === 'pending') assert(mailCount.some(subject => subject.includes('Aviso pendiente')));
@@ -213,7 +218,7 @@ async function main() {
     assert.equal(response.status, 200);
     const result = await response.json();
     assert.equal(result.result?.action, 'summary', 'Ollama debe responder a través del webhook real de n8n');
-    console.info(`PostgreSQL: 1 movimiento por COP 25, 1 remitente sin verificar, 1 aviso ${ambiguous.status}, 1 descartado, sin duplicados. SMTP y Ollama verificados.`);
+    console.info(`PostgreSQL: Agaval en Compras por COP 50.000, movimiento bancario por COP 25, 1 aviso ${ambiguous.status} y 1 descartado. SMTP y Ollama verificados.`);
     console.info(`API Android: ${apiOrigin} · TEST_GMAIL_E2E_EMAIL=${email}`);
   } catch (error) {
     await app.close();

@@ -11,7 +11,8 @@ import { Database } from '../src/db.js';
 import { Gmail } from '../src/gmail.js';
 import { createApp } from '../src/main.js';
 import { Worker } from '../src/worker.js';
-import { bank, bankSender, filterAndResolve, goodModel, legacyInput, oauthInput } from './pipeline.fixture.mjs';
+import { agaval, agavalModel, agavalSubject, bank, bankSender, filterAndResolve, goodModel, legacyInput,
+  oauthInput, shopSender } from './pipeline.fixture.mjs';
 
 const connection = process.env.MAILGASTO_TEST_DATABASE_URL;
 const origin = 'http://localhost:3105';
@@ -160,6 +161,17 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
   const report = await (await request('summary?from=2026-11-10&to=2026-11-10&category=alimentacion', 'GET', undefined, owner)).json();
   assert.deepEqual(report.totals.map((row: { currency: string; amount_minor: string }) => [row.currency, row.amount_minor]),
     [['COP', '32500000'], ['USD', '1250']]);
+  const receipt = filterAndResolve(legacyInput('agaval', simulatedArrival, agaval, shopSender, agavalSubject), agavalModel);
+  assert.equal((await (await post(receipt)).json()).outcome, 'stored');
+  assert.equal((await (await post(receipt)).json()).outcome, 'duplicate');
+  const purchases = (await (await request('movements?category=compras', 'GET', undefined, owner)).json()).items;
+  assert.equal(purchases.length, 1);
+  assert.deepEqual(
+    [purchases[0].amount_minor, purchases[0].payment_method, purchases[0].category, purchases[0].direction],
+    ['5000000', null, 'compras', 'expense'],
+  );
+  const purchaseReport = await (await request('summary?category=compras', 'GET', undefined, owner)).json();
+  assert.deepEqual(purchaseReport.totals, [{ currency: 'COP', category: null, amount_minor: '5000000', count: 1 }]);
 
   const session = (await (await request('chat/sessions', 'POST', undefined, owner)).json()).id;
   const chatPath = 'chat/sessions/' + session + '/messages';
@@ -167,12 +179,14 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
   assert.match((await (await request(chatPath, 'POST', { message: 'Total 2026-11-10' }, owner)).json()).answer, /COP.*USD/);
   const emptyChat = await (await request(chatPath, 'POST', { message: 'Total de ocio el 2026-11-09' }, owner)).json();
   assert.match(emptyChat.answer, /2026-11-09 a 2026-11-09.*No hay gastos registrados/);
+  const clothesChat = await (await request(chatPath, 'POST', { message: '¿Cuánto gasté en ropa el 2026-11-10?' }, owner)).json();
+  assert.match(clothesChat.answer, /COP 50\.000,00/);
   const allChat = await (await request(chatPath, 'POST', { message: 'Todo el historial' }, owner)).json();
   assert.match(allChat.answer, /Todo el historial/);
   assert.match((await (await request(chatPath, 'POST', { message: 'Registra un gasto de 5.000' }, owner)).json()).answer, /Reenvía/);
-  assert.equal((await (await request(chatPath, 'GET', undefined, owner)).json()).length, 4);
+  assert.equal((await (await request(chatPath, 'GET', undefined, owner)).json()).length, 5);
   const queued = await db.query("SELECT dedupe_key FROM outbox o JOIN accounts a ON a.id=o.account_id WHERE a.email=$1 AND o.status='queued'", [ownerEmail]);
-  assert.equal(queued.rows.length, 15);
+  assert.equal(queued.rows.length, 16);
 
   // Fail PostgreSQL during the movement insert and verify the notice and outbox roll back together.
   const failed = direct('pg-failure');
@@ -185,7 +199,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
   try {
     assert.equal((await post(failed)).status, 500);
     assert.equal((await db.query("SELECT 1 FROM notices WHERE message_id='pg-failure'")).rowCount, 0);
-    assert.equal((await db.query("SELECT 1 FROM outbox o JOIN accounts a ON a.id=o.account_id WHERE a.email=$1 AND o.status='queued'", [ownerEmail])).rowCount, 15);
+    assert.equal((await db.query("SELECT 1 FROM outbox o JOIN accounts a ON a.id=o.account_id WHERE a.email=$1 AND o.status='queued'", [ownerEmail])).rowCount, queued.rows.length);
   } finally {
     await db.query('DROP TRIGGER ' + failFunction + ' ON transactions');
     await db.query('DROP FUNCTION ' + failFunction + '()');

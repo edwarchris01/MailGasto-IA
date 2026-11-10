@@ -62,7 +62,7 @@ test('combina avisos y manuales, conserva monedas y protege datos y credenciales
   const period = 'from=' + day + '&to=' + day + '&currency=COP';
   const income = { requestId: randomUUID(), amountMinor: '165000000', date: day, direction: 'income', currency: 'COP' };
   const expense = { requestId: randomUUID(), amountMinor: '48600000', date: day, direction: 'expense',
-    currency: 'COP', category: 'alimentacion', description: 'Compra de prueba' };
+    currency: 'COP', category: 'compras', description: 'Compra de prueba' };
   const create = async (value: unknown) => {
     const response = await request('movements', 'POST', value, cookie);
     assert.equal(response.status, 201);
@@ -78,6 +78,7 @@ test('combina avisos y manuales, conserva monedas y protege datos y credenciales
   const result = await analytics();
   assert.deepEqual([result.incomeMinor, result.expenseMinor, result.balanceMinor], ['165000000', '48600000', '116400000']);
   assert.deepEqual(result.incomeSources, [{ key: 'manual', amountMinor: '165000000' }]);
+  assert.deepEqual(result.expenseCategories, [{ key: 'compras', amountMinor: '48600000' }]);
   assert.deepEqual(result.series, [{ from: day, to: day, incomeMinor: '165000000', expenseMinor: '48600000', balanceMinor: '116400000' }]);
   assert.equal((await (await request('movements?' + period + '&direction=income', 'GET', undefined, cookie)).json()).items.length, 1);
   const { rows: [mailbox] } = await db.query('INSERT INTO mailboxes (account_id,email,source,state) VALUES ($1,$2,$3,$4) RETURNING id',

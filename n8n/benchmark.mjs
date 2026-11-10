@@ -45,6 +45,15 @@ fixtures.push(
     expectedStatus: 'pending',
     expectedUnconfirmed: 'amount',
   },
+  {
+    from: 'avisos@comercio.example',
+    subject: 'Pago de ropa',
+    text: 'Tu pago fue procesado, pagaste 50.000 en almacenes Agaval, el 10/11/2026 a las 12:00pm, gracias por tu compra.',
+    expected: {
+      amountMinor: '5000000', currency: 'COP', date: '2026-11-10', paymentMethod: null,
+      direction: 'expense', category: 'compras',
+    },
+  },
 );
 const workflow = buildGmailWorkflow({ senderJson: JSON.stringify(senders) });
 const label = 'MailGasto IA · Piloto sintético';

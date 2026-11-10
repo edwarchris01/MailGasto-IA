@@ -33,6 +33,7 @@ const categories = {
   'ocio': 'Ocio',
   'salud': 'Salud',
   'educacion': 'Educación',
+  'compras': 'Compras',
   'ingresos': 'Ingresos',
   'otros': 'Otros',
 };

@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { gmailResult } from '../src/gmail-results.js';
-import { bank, bankSender, filterAndResolve, flow, goodModel, legacyInput, oauthInput, runCode, wrap } from './pipeline.fixture.mjs';
+import { agaval, agavalModel, agavalMovement, agavalSubject, bank, bankSender, filterAndResolve, flow, goodModel,
+  legacyInput, oauthInput, runCode, shopSender, wrap } from './pipeline.fixture.mjs';
 
 test('both Gmail triggers use the same filter and the model receives only a sanitized fragment', () => {
   const receivedAt = '2026-11-10T13:00:00.000Z';
@@ -20,7 +21,9 @@ test('both Gmail triggers use the same filter and the model receives only a sani
   assert.equal(agent.type, '@n8n/n8n-nodes-langchain.agent');
   assert.equal(agent.parameters.options.maxIterations, 2);
   assert.equal(model.parameters.model, 'qwen3.5:4b');
-  assert.deepEqual(JSON.parse(modelInput), { provider: 'nequi', text: filtered[1].json.notice.text });
+  assert.deepEqual(JSON.parse(modelInput), {
+    provider: 'nequi', subject: 'Aviso de pago', body: filtered[1].json.notice.body,
+  });
   assert.doesNotMatch(modelInput, /12345678901|https:|@example|oauth-fixture|deliveryId/);
   assert.ok(gmailResult.safeParse(filterAndResolve(direct)).success);
   assert.ok(gmailResult.safeParse(filterAndResolve(oauth)).success);
@@ -44,8 +47,54 @@ test('Gmail direct retains its retry ID until NestJS confirms, including HTTP fa
   ];
   const confirmed = runCode('Confirmar entrega del Gmail directo', responses, references);
   assert.deepEqual(confirmed, [{ json: { retryId: 6 }, pairedItem: { item: 2 } }]);
-  const next = runCode('Continuar lote', responses, references);
-  assert.deepEqual(next.map(item => item.pairedItem.item), [0, 2]);
+  const next = runCode('Continuar lote', responses);
+  assert.deepEqual(next.map(item => item.pairedItem.item), [0, 1, 2]);
+});
+
+test('registers Agaval as Compras through Gmail direct and OAuth with no invented payment method', () => {
+  const receivedAt = '2026-11-10T17:01:00.000Z';
+  const direct = legacyInput('agaval-legacy', receivedAt, agaval, shopSender, agavalSubject);
+  const oauth = oauthInput({
+    deliveryId: randomUUID(), attemptId: randomUUID(), messageId: 'agaval-oauth', receivedAt,
+    labels: ['INBOX'], from: shopSender, subject: agavalSubject, text: agaval,
+  });
+  for (const input of [direct, oauth]) {
+    const result = filterAndResolve(input, agavalModel);
+    assert.equal(result.status, 'registered');
+    assert.equal(result.provider, 'other');
+    assert.deepEqual(result.movement, agavalMovement);
+    assert.ok(gmailResult.safeParse(result).success);
+  }
+  assert.equal(filterAndResolve(direct, null).status, 'error');
+  const subjectOnly = legacyInput('subject-only', receivedAt, '', shopSender, agavalSubject);
+  assert.equal(filterAndResolve(subjectOnly, agavalModel).status, 'pending');
+  const canceled = legacyInput('canceled', receivedAt, agaval + ' Tu pago fue cancelado.', shopSender, agavalSubject);
+  assert.equal(filterAndResolve(canceled, agavalModel), undefined);
+  const notTransaction = {
+    ...agavalModel, classification: 'not_transaction', amountMinor: null, currency: null, date: null, direction: null,
+  };
+  assert.equal(filterAndResolve(direct, notTransaction), undefined);
+  const discarded = filterAndResolve(oauth, notTransaction);
+  assert.equal(discarded.status, 'ignored');
+  assert.ok(gmailResult.safeParse(discarded).success);
+});
+
+test('uses literal evidence for categories and gives the purchase concept in the body priority', () => {
+  const receivedAt = '2026-11-10T17:01:00.000Z';
+  const extract = (body: string, subject: string, model = agavalModel) =>
+    filterAndResolve(legacyInput('category', receivedAt, body, shopSender, subject), model).movement;
+  assert.equal(extract(agaval, 'Confirmación de pago', agavalModel).category, 'otros');
+  assert.equal(extract(agaval, 'Confirmación de pago', {
+    ...agavalModel, categoryEvidence: 'almacenes Agaval',
+  }).category, 'otros');
+  assert.equal(extract(agaval + ' Concepto: medicamentos.', agavalSubject).category, 'salud');
+  assert.equal(extract(agaval + ' Producto: botas de senderismo.', 'Pago confirmado', {
+    ...agavalModel, categoryEvidence: 'botas de senderismo',
+  }).category, 'compras');
+  assert.equal(extract(agaval + ' Conceptos: calzado y medicamentos.', agavalSubject).category, 'otros');
+  for (const [text, currency] of [['EUR 50.000', 'EUR'], ['50.000 USD', 'USD'], ['50.000. Moneda: USD.', 'USD']]) {
+    assert.equal(extract(agaval.replace('50.000', text), agavalSubject, { ...agavalModel, currency }).currency, currency);
+  }
 });
 
 test('the agent tool applies the local rules and leaves conflicting amounts unresolved', () => {

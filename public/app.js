@@ -3,7 +3,7 @@ const $ = id => document.getElementById(id);
 const statuses = { registered: 'Registrado', pending: 'Pendiente', error: 'Error', processing: 'En proceso' };
 const categoryNames = {
   alimentacion: 'Alimentación', transporte: 'Transporte', vivienda: 'Vivienda', ocio: 'Ocio',
-  salud: 'Salud', educacion: 'Educación', ingresos: 'Ingresos', otros: 'Otros',
+  salud: 'Salud', educacion: 'Educación', compras: 'Compras', ingresos: 'Ingresos', otros: 'Otros',
 };
 const flash = message => { $('status').textContent = message; };
 const formValues = form => Object.fromEntries(new FormData(form));
@@ -89,7 +89,8 @@ async function loadNotices() {
     const detail = element('button', 'Ver detalle');
     action(detail, 'click', async () => {
       const value = await api('notices/' + row.id);
-      const data = [statuses[value.status], value.transaction_date, value.description, value.payment_method,
+      const data = [statuses[value.status], value.transaction_date, value.description,
+        value.payment_method ?? (value.status === 'registered' ? 'Sin especificar' : null),
         categoryNames[value.category], value.amount_minor && money(value.amount_minor, value.currency)].filter(Boolean);
       $('notice-detail').replaceChildren(element('p', data.join(' · ')));
     });

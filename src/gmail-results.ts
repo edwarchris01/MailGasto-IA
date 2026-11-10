@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { queueMail } from './accounts.js';
 import { CONFIG, Config } from './config.js';
 import { Database } from './db.js';
-import { amountPattern, bankProviders, categories, currencies, directions, paymentMethods, providers, redact, unconfirmedFields } from './mail-rules.js';
+import { amountPattern, categories, currencies, directions, paymentMethods, providers, redact, unconfirmedFields } from './mail-rules.js';
 
 export const messageIdPattern = /^[A-Za-z0-9_-]{1,200}$/;
 const timestamp = z.iso.datetime({ offset: true });
@@ -12,7 +12,7 @@ const movement = z.strictObject({
   amountMinor: z.string().regex(amountPattern),
   currency: z.enum(currencies),
   date: z.iso.date().refine(value => !value.startsWith('0000')),
-  paymentMethod: z.enum(paymentMethods),
+  paymentMethod: z.enum(paymentMethods).nullable(),
   description: z.string().trim().min(1).max(160),
   category: z.enum(categories),
   direction: z.enum(directions),
@@ -26,19 +26,20 @@ const identity = {
   attemptId: z.uuid().optional(),
 };
 const notice = {
-  ...identity, provider: z.enum(bankProviders), forwarded: z.boolean(),
+  ...identity, provider: z.enum(providers), forwarded: z.boolean(),
 };
 export const gmailResult = z.discriminatedUnion('status', [
   z.strictObject({ ...identity, status: z.literal('ignored') }),
   z.strictObject({ ...notice, status: z.literal('registered'), confidence: z.number().min(0.7).max(1), movement }),
-  z.strictObject({ ...notice, provider: z.enum(providers), status: z.literal('pending'), confidence: z.number().min(0).max(1),
+  z.strictObject({ ...notice, status: z.literal('pending'), confidence: z.number().min(0).max(1),
     reason: z.enum(['missing_or_ambiguous_fields', 'unconfirmed_extraction', 'unverified_sender']),
     unconfirmedFields: z.array(z.enum(unconfirmedFields)).max(unconfirmedFields.length).optional() }),
   z.strictObject({ ...notice, status: z.literal('error'), confidence: z.literal(0), reason: z.literal('extractor_unavailable') }),
 ]).refine(value => (value.source === 'oauth'
   ? value.deliveryId !== undefined && value.attemptId !== undefined && value.startedAt === undefined
   : value.deliveryId === undefined && value.attemptId === undefined && value.startedAt !== undefined && value.status !== 'ignored') &&
-  (value.status !== 'pending' || (value.provider === 'other') === (value.reason === 'unverified_sender')));
+  (value.status !== 'pending' || value.reason !== 'unverified_sender' || value.provider === 'other') &&
+  (value.status !== 'registered' || value.provider === 'other' || value.movement.paymentMethod !== null));
 
 type Result = z.infer<typeof gmailResult>;
 type Mailbox = { id: string; account_id: string; state: string; generation: string; linked_at: Date; source: string };
@@ -85,7 +86,7 @@ export class GmailResults {
             'reason' in result ? result.reason : null, result.confidence, accepted,
             result.status === 'pending' ? result.unconfirmedFields ?? null : null],
         );
-        if (saved) await saveNoticeEffects(client, this.config, mailbox.account_id, saved.id, result);
+        if (saved) await saveNoticeEffects(client, this.config, mailbox.account_id, saved.id, result, result.provider);
         outcome = saved ? 'stored' : 'duplicate';
       }
       if (oauth) await client.query('UPDATE gmail_deliveries SET completed_at=clock_timestamp() WHERE id=$1', [result.deliveryId]);
@@ -94,10 +95,11 @@ export class GmailResults {
   }
 }
 
-type NoticeEffect = { status: 'registered'; movement: Record<keyof z.infer<typeof movement>, string> } |
+type NoticeEffect = { status: 'registered'; movement: z.infer<typeof movement> } |
   { status: 'pending'; reason: string } | { status: 'error' };
 
-export async function saveNoticeEffects(client: PoolClient, config: Config, owner: string, noticeId: string, result: NoticeEffect) {
+export async function saveNoticeEffects(client: PoolClient, config: Config, owner: string, noticeId: string,
+  result: NoticeEffect, provider: typeof providers[number]) {
   if (result.status === 'registered') {
     const m = result.movement;
     await client.query(
@@ -107,7 +109,7 @@ export async function saveNoticeEffects(client: PoolClient, config: Config, owne
     );
     await queueMail(client, config, owner, 'registered:' + noticeId, 'Movimiento registrado',
       'Registramos un movimiento de tu buzón vinculado. Consulta el detalle en ' + config.origin);
-  } else if (result.status === 'pending' && result.reason !== 'unverified_sender') {
+  } else if (result.status === 'pending' && provider !== 'other' && result.reason !== 'unverified_sender') {
     await queueMail(client, config, owner, 'pending:' + noticeId, 'Aviso pendiente',
       'No pudimos confirmar todos los datos. Reenvía el aviso bancario completo y original al buzón vinculado.');
   }
