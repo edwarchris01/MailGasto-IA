@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/api.dart';
+import '../../core/design.dart';
 import '../../core/format.dart';
 import '../../core/widgets.dart';
 import '../auth/auth.dart';
@@ -124,11 +125,14 @@ class ChatScreen extends ConsumerStatefulWidget {
 
 class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _input = TextEditingController();
+  final _scroll = ScrollController();
+  final _latestTurn = GlobalKey();
   bool _busy = false;
 
   @override
   void dispose() {
     _input.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
@@ -150,176 +154,429 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     FocusScope.of(context).unfocus();
     await _act(() async {
       await ref.read(chatProvider.notifier).send(message);
-      if (mounted) _input.clear();
+      if (mounted) {
+        _input.clear();
+        _showLatest();
+      }
+    });
+  }
+
+  Future<void> _open(String? id) => _act(() async {
+    await ref.read(chatProvider.notifier).open(id);
+    if (!mounted) return;
+    _input.clear();
+    _showLatest();
+  });
+
+  void _showLatest() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      final target = _latestTurn.currentContext;
+      if (target != null) {
+        Scrollable.ensureVisible(
+          target,
+          alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
+        );
+      } else {
+        final empty =
+            ref.read(chatProvider).asData?.value.turns.isEmpty ?? true;
+        _scroll.jumpTo(empty ? 0 : _scroll.position.maxScrollExtent);
+      }
     });
   }
 
   @override
   Widget build(BuildContext context) {
     final chat = ref.watch(chatProvider);
-    final colors = Theme.of(context).colorScheme;
+    final data = chat.asData?.value;
     return Scaffold(
-      appBar: AppBar(title: const Text('Asistente')),
-      body: chat.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, _) =>
-            RetryMessage(error, () => ref.invalidate(chatProvider)),
-        data: (value) => SafeArea(
-          top: false,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      appBar: brandBar(),
+      body: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: CustomScrollView(
+                controller: _scroll,
+                slivers: [
+                  SliverToBoxAdapter(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const PageHeading(
+                          'Asistente',
+                          eyebrow: 'CONSULTAS',
+                          description:
+                              'Pregunta por tus ingresos y gastos registrados.',
+                        ),
+                        const SizedBox(height: 7),
+                        if (data != null) _conversationControls(data),
+                        if (_busy || chat.isLoading) ...[
+                          const SizedBox(height: 6),
+                          const LinearProgressIndicator(
+                            semanticsLabel: 'Cargando conversación',
+                            minHeight: 4,
+                            borderRadius: BorderRadius.all(Radius.circular(4)),
+                          ),
+                        ],
+                        const SizedBox(height: 12),
+                        if (chat.hasError)
+                          AppPanel(
+                            child: RetryMessage(
+                              chat.error!,
+                              () => ref.invalidate(chatProvider),
+                            ),
+                          )
+                        else if (data != null && data.turns.isEmpty)
+                          const AppNotice(
+                            icon: Icons.forum_outlined,
+                            title: 'Empieza una conversación',
+                            description:
+                                'Consulta tus totales o compara los movimientos del periodo.',
+                          ),
+                      ],
+                    ),
+                  ),
+                  if (data != null) ...[
+                    SliverList.builder(
+                      itemCount: data.turns.length,
+                      itemBuilder: (context, index) => _ChatTurn(
+                        data.turns[index],
+                        key: index == data.turns.length - 1
+                            ? _latestTurn
+                            : null,
+                      ),
+                    ),
+                    SliverFillRemaining(
+                      hasScrollBody: false,
+                      child: Align(
+                        alignment: Alignment.bottomLeft,
+                        child: _suggestions(),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(
+                  child: Semantics(
+                    label: 'Pregunta por tus movimientos',
+                    child: TextField(
+                      key: const ValueKey('chat-question'),
+                      controller: _input,
+                      enabled: data != null && !_busy,
+                      minLines: 1,
+                      maxLines: 3,
+                      maxLength: 1000,
+                      decoration: const InputDecoration(
+                        hintText: 'Pregunta por tus movimientos',
+                        counterText: '',
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                SizedBox.square(
+                  dimension: 48,
+                  child: IconButton.filled(
+                    tooltip: 'Enviar',
+                    style: IconButton.styleFrom(
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(13),
+                      ),
+                    ),
+                    onPressed: data == null || _busy ? null : _send,
+                    icon: const Icon(Icons.send_outlined, size: 21),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _conversationControls(ChatState value) => Wrap(
+    spacing: 8,
+    runSpacing: 4,
+    crossAxisAlignment: WrapCrossAlignment.center,
+    children: [
+      PopupMenuButton<String>(
+        tooltip: 'Abrir conversaciones',
+        enabled: !_busy,
+        initialValue: value.selected ?? '',
+        child: const FilterLabel(
+          'Conversaciones',
+          icon: Icons.forum_outlined,
+          highlighted: true,
+        ),
+        itemBuilder: (_) => [
+          const PopupMenuItem(value: '', child: Text('Nueva conversación')),
+          for (final item in value.conversations)
+            PopupMenuItem(
+              value: item.id,
+              child: Text(syncLabel(item.createdAt)),
+            ),
+        ],
+        onSelected: (id) => _open(id.isEmpty ? null : id),
+      ),
+      OutlinedButton.icon(
+        onPressed: _busy ? null : () => _open(null),
+        style: OutlinedButton.styleFrom(
+          foregroundColor: AppColors.muted,
+          side: const BorderSide(color: AppColors.border),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          minimumSize: const Size(0, 34),
+          iconSize: 15,
+          textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+        ),
+        icon: const Icon(Icons.add_rounded),
+        label: const Text('Nuevo chat'),
+      ),
+    ],
+  );
+
+  Widget _suggestions() => Padding(
+    padding: const EdgeInsets.only(top: 6),
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Sugerencias', style: Theme.of(context).textTheme.labelMedium),
+        const SizedBox(height: 3),
+        Wrap(
+          spacing: 6,
+          children: [
+            for (final (prompt, icon) in const [
+              ('¿Cuánto ingresó este mes?', Icons.south_west_rounded),
+              ('Compara mis ingresos y gastos', Icons.bar_chart_rounded),
+              (
+                '¿Cuánto gasté en alimentación este mes?',
+                Icons.north_east_rounded,
+              ),
+            ])
+              ActionChip(
+                avatar: Icon(icon, size: 15, color: AppColors.accent),
+                backgroundColor: AppColors.blueTint,
+                side: BorderSide.none,
+                labelPadding: const EdgeInsets.only(right: 5),
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                labelStyle: Theme.of(
+                  context,
+                ).textTheme.labelSmall?.copyWith(color: AppColors.accent),
+                label: Text(prompt),
+                onPressed: _busy ? null : () => _input.text = prompt,
+              ),
+          ],
+        ),
+      ],
+    ),
+  );
+}
+
+class _ChatTurn extends StatelessWidget {
+  const _ChatTurn(this.turn, {super.key});
+  final Turn turn;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final comparison = _comparison(turn.answer);
+    final range = turn.range;
+    final from = range['from'];
+    final to = range['to'];
+    final period =
+        from != null &&
+            to != null &&
+            DateTime.tryParse(from) != null &&
+            DateTime.tryParse(to) != null
+        ? periodLabel(from, to)
+        : comparison?.period;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Align(
+            alignment: Alignment.centerRight,
+            child: FractionallySizedBox(
+              widthFactor: .87,
+              alignment: Alignment.centerRight,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  color: AppColors.blueTint,
+                  borderRadius: BorderRadius.circular(17),
+                ),
+                child: Text(
+                  turn.question,
+                  style: text.bodyMedium?.copyWith(color: AppColors.accent),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          AppPanel(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Row(
                   children: [
+                    const IconTile(Icons.auto_awesome_outlined, size: 29),
+                    const SizedBox(width: 8),
                     Expanded(
-                      child: DropdownButton<String>(
-                        value: value.selected ?? '',
-                        isExpanded: true,
-                        items: [
-                          const DropdownMenuItem(
-                            value: '',
-                            child: Text('Nueva conversación'),
-                          ),
-                          for (final item in value.conversations)
-                            DropdownMenuItem(
-                              value: item.id,
-                              child: Text(syncLabel(item.createdAt)),
-                            ),
-                        ],
-                        onChanged: _busy
-                            ? null
-                            : (id) => _act(() async {
-                                await ref
-                                    .read(chatProvider.notifier)
-                                    .open(id == '' ? null : id);
-                                if (mounted) _input.clear();
-                              }),
+                      child: Text(
+                        turn.action == 'analysis'
+                            ? 'Resumen del periodo'
+                            : 'MailGasto IA',
+                        style: text.titleMedium,
                       ),
-                    ),
-                    IconButton(
-                      tooltip: 'Nueva conversación',
-                      onPressed: _busy
-                          ? null
-                          : () => _act(() async {
-                              await ref.read(chatProvider.notifier).open(null);
-                              if (mounted) _input.clear();
-                            }),
-                      icon: const Icon(Icons.add_comment_outlined),
                     ),
                   ],
                 ),
-                if (_busy) const LinearProgressIndicator(),
-                Expanded(
-                  child: value.turns.isEmpty
-                      ? ListView(
-                          children: [
-                            const SizedBox(height: 20),
-                            const Text(
-                              'Pregunta por los ingresos y gastos de tu cuenta.',
-                            ),
-                            const SizedBox(height: 12),
-                            Wrap(
-                              spacing: 8,
-                              children: [
-                                for (final prompt in const [
-                                  '¿Cuánto ingresó este mes?',
-                                  'Compara mis ingresos y gastos',
-                                  '¿Cuánto gasté en alimentación este mes?',
-                                ])
-                                  ActionChip(
-                                    label: Text(prompt),
-                                    onPressed: _busy
-                                        ? null
-                                        : () => _input.text = prompt,
-                                  ),
-                              ],
-                            ),
-                          ],
-                        )
-                      : ListView.builder(
-                          reverse: true,
-                          itemCount: value.turns.length,
-                          itemBuilder: (context, index) {
-                            final turn =
-                                value.turns[value.turns.length - index - 1];
-                            return Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                Card(
-                                  color: colors.secondaryContainer,
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(14),
-                                    child: Text(turn.question),
-                                  ),
-                                ),
-                                Card(
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(14),
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(turn.answer),
-                                        if (turn.action == 'register')
-                                          TextButton(
-                                            onPressed: () =>
-                                                context.push('/history/new'),
-                                            child: const Text(
-                                              'Registrar movimiento',
-                                            ),
-                                          ),
-                                        if (turn.action == 'analysis' &&
-                                            turn.range.isNotEmpty)
-                                          TextButton(
-                                            onPressed: () => context.go(
-                                              financePath(
-                                                '/analysis',
-                                                turn.range,
-                                              ),
-                                            ),
-                                            child: const Text('Ver análisis'),
-                                          ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 10),
-                              ],
-                            );
-                          },
-                        ),
-                ),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        key: const ValueKey('chat-question'),
-                        controller: _input,
-                        enabled: !_busy,
-                        minLines: 1,
-                        maxLines: 3,
-                        maxLength: 1000,
-                        decoration: const InputDecoration(
-                          labelText: 'Escribe tu pregunta',
-                          counterText: '',
-                        ),
+                const SizedBox(height: 9),
+                if (comparison != null) ...[
+                  Text(
+                    comparison.values.length == 1
+                        ? '${period ?? comparison.period} · ${comparison.values.single.currency}'
+                        : period ?? comparison.period,
+                    style: text.bodySmall,
+                  ),
+                  for (final (index, series) in comparison.values.indexed) ...[
+                    if (index > 0) const Divider(height: 18),
+                    const SizedBox(height: 7),
+                    if (comparison.values.length > 1) ...[
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: AppBadge(series.currency),
                       ),
+                      const SizedBox(height: 4),
+                    ],
+                    _line(
+                      context,
+                      'Ingresos',
+                      series.income,
+                      series.currency,
+                      AppColors.income,
                     ),
-                    IconButton.filled(
-                      tooltip: 'Enviar',
-                      onPressed: _busy ? null : _send,
-                      icon: const Icon(Icons.send),
+                    _line(
+                      context,
+                      'Gastos',
+                      series.expense,
+                      series.currency,
+                      AppColors.expense,
+                    ),
+                    _line(
+                      context,
+                      'Balance del periodo',
+                      series.balance,
+                      series.currency,
+                      AppColors.ink,
+                      signed: true,
                     ),
                   ],
-                ),
+                ] else
+                  Text(turn.answer, style: text.bodyMedium),
+                if (turn.action == 'register') ...[
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: () => context.push('/history/new'),
+                    icon: const Icon(Icons.add_rounded),
+                    label: const Text('Registrar movimiento'),
+                  ),
+                ],
+                if (turn.action == 'analysis' && range.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: () =>
+                        context.go(financePath('/analysis', range)),
+                    icon: const Icon(Icons.bar_chart_rounded),
+                    label: const Text('Ver análisis'),
+                  ),
+                ],
               ],
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _line(
+    BuildContext context,
+    String label,
+    BigInt amount,
+    String currency,
+    Color color, {
+    bool signed = false,
+  }) {
+    final style = Theme.of(context).textTheme.titleMedium?.copyWith(
+      color: color,
+      fontFeatures: tabularFigures,
+    );
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: TrailingRow(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        leading: Text(label, style: style),
+        trailing: Text(
+          '${signed && amount > BigInt.zero ? '+ ' : ''}${displayMoney(amount, currency)}',
+          semanticsLabel: money(amount, currency),
+          textAlign: TextAlign.end,
+          style: style,
         ),
       ),
     );
   }
+}
+
+typedef _ChatAmounts = ({
+  String currency,
+  BigInt income,
+  BigInt expense,
+  BigInt balance,
+});
+
+final _comparisonAnswer = RegExp(
+  r'^Total de ingresos y gastos \(([^)]+)\): (.+)\.$',
+);
+final _comparisonAmounts = RegExp(
+  r'^(COP|USD|EUR) — Ingresos (\d[\d.]*,\d{2}), gastos (\d[\d.]*,\d{2}), balance ([−-]?\d[\d.]*,\d{2})$',
+);
+
+// Format only the server's known comparison template. Leave other answers intact.
+({String period, List<_ChatAmounts> values})? _comparison(String answer) {
+  final match = _comparisonAnswer.firstMatch(answer);
+  if (match == null) return null;
+  final values = <_ChatAmounts>[];
+  BigInt? minor(String value) => BigInt.tryParse(
+    value.replaceAll(RegExp(r'[.,]'), '').replaceAll('−', '-'),
+  );
+  for (final text in match[2]!.split(' · ')) {
+    final row = _comparisonAmounts.firstMatch(text);
+    if (row == null) return null;
+    final income = minor(row[2]!);
+    final expense = minor(row[3]!);
+    final balance = minor(row[4]!);
+    if (income == null || expense == null || balance == null) return null;
+    values.add((
+      currency: row[1]!,
+      income: income,
+      expense: expense,
+      balance: balance,
+    ));
+  }
+  return (period: match[1]!, values: values);
 }

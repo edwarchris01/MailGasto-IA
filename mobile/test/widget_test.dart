@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intl/date_symbol_data_local.dart';
+import 'package:mailgasto/core/design.dart';
 import 'package:mailgasto/core/format.dart';
+import 'package:mailgasto/core/widgets.dart';
 import 'package:mailgasto/features/auth/auth.dart';
 import 'package:mailgasto/features/expenses/expenses.dart';
 import 'package:mailgasto/features/expenses/movements_screen.dart';
@@ -22,11 +24,14 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('Iniciar sesión'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Iniciar sesión'), findsOneWidget);
     expect(find.text('Historial'), findsNothing);
-    await tester.tap(find.text('Crear cuenta'));
+    final register = find.widgetWithText(OutlinedButton, 'Crear cuenta');
+    await tester.ensureVisible(register);
     await tester.pumpAndSettle();
-    expect(find.text('Registrarme'), findsOneWidget);
+    await tester.tap(register);
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(FilledButton, 'Crear cuenta'), findsOneWidget);
   });
 
   test('Formatea centavos exactos sin convertir a double', () {
@@ -79,7 +84,10 @@ void main() {
     });
     await tester.pumpWidget(
       ProviderScope(
-        child: MaterialApp(home: MovementForm(notice: notice)),
+        child: MaterialApp(
+          theme: mailGastoTheme(),
+          home: MovementForm(notice: notice),
+        ),
       ),
     );
     final amount = tester.widget<TextFormField>(
@@ -88,11 +96,11 @@ void main() {
     expect(amount.controller!.text, '12,50');
     expect(
       tester
-          .widget<ChoiceChip>(find.widgetWithText(ChoiceChip, 'Gasto'))
+          .widget<SegmentTabs<String>>(find.byType(SegmentTabs<String>))
           .selected,
-      isTrue,
+      'expense',
     );
-    expect(find.text('Fecha · 10/11/2026'), findsOneWidget);
+    expect(find.text('10 nov 2026'), findsOneWidget);
     final selectors = tester.widgetList<DropdownButtonFormField<String>>(
       find.byType(DropdownButtonFormField<String>),
     );

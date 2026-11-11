@@ -46,16 +46,16 @@ void main() {
         find.byKey(const ValueKey('password')),
         'synthetic-gmail-e2e-password',
       );
-      await tap(find.text('Iniciar sesión'));
-      await waitFor(find.text('COP 50.025,00'));
+      await tap(find.widgetWithText(FilledButton, 'Iniciar sesión'));
+      await waitFor(find.text(r'$50.025'));
 
       await tap(tab('Movimientos'));
       await tap(find.text('Categoría'));
       await tap(find.text('Compras'));
-      final movement = find.text('− COP 50.000,00');
+      final movement = find.text(r'− $50.000');
       await waitFor(movement);
       expect(movement, findsOneWidget);
-      expect(find.text('− COP 25,00'), findsNothing);
+      expect(find.text(r'− $25'), findsNothing);
       await tap(movement);
       await waitFor(find.text('Detalle del movimiento'));
       await waitFor(
@@ -66,8 +66,10 @@ void main() {
       await tap(find.byType(BackButton));
 
       await tap(tab('Análisis'));
+      await tap(find.text('Ver desgloses'));
       await waitFor(find.text('Gastos por categoría'));
-      await waitFor(find.text('Compras · COP 50.000,00'));
+      await waitFor(find.text('Compras'));
+      await waitFor(find.text(r'$50.000'));
 
       await tap(tab('Asistente'));
       await tap(find.text('¿Cuánto gasté en alimentación este mes?'));

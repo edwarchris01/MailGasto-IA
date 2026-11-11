@@ -1,22 +1,19 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
+import '../../core/design.dart';
 import '../../core/format.dart';
 import '../../core/widgets.dart';
 import '../auth/auth.dart';
 import '../mailboxes/mailboxes.dart';
 import 'expenses.dart';
 import 'finance.dart';
+import 'finance_chart.dart';
+import 'notice_style.dart';
 
-const incomeColor = Color(0xff08785b);
-const expenseColor = Color(0xff5140c1);
-const ink = Color(0xff111a40);
-const incomeSurface = Color(0xffe6f7f0);
-const expenseSurface = Color(0xfff0edff);
+enum _AnalysisView { chart, breakdowns, table }
 
 class FinanceScreen extends ConsumerStatefulWidget {
   const FinanceScreen({super.key, this.home = false, this.initial});
@@ -28,14 +25,17 @@ class FinanceScreen extends ConsumerStatefulWidget {
 }
 
 class _FinanceScreenState extends ConsumerState<FinanceScreen> {
+  final _periodMenu = GlobalKey<PopupMenuButtonState<String>>();
   late FinanceRange _range = widget.initial ?? currentRange();
   Bucket? _selected;
-  bool _table = false;
+  var _view = _AnalysisView.chart;
 
   void _setRange(FinanceRange value) => setState(() {
     _range = value;
     _selected = null;
   });
+
+  void _open(_AnalysisView view) => setState(() => _view = view);
 
   void _movements([Map<String, String> filter = const {}]) =>
       context.go(financePath('/history', {...rangeQuery(_range), ...filter}));
@@ -55,221 +55,362 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
         .trim()
         .split(RegExp(r'\s+'))
         .firstOrNull;
-    return Scaffold(
-      appBar: AppBar(
-        title: const Row(
-          children: [
-            Image(
-              image: AssetImage('assets/brand.png'),
-              width: 34,
-              height: 34,
-              excludeFromSemantics: true,
-            ),
-            SizedBox(width: 6),
-            Text('MailGasto IA'),
-          ],
-        ),
-      ),
-      body: RefreshIndicator(
-        onRefresh: () => ref
-            .refresh(provider.future)
-            .then<void>((_) {}, onError: (Object _) {}),
-        child: ListView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
-          children: [
-            Text(
-              widget.home && name != null ? 'Hola, $name' : 'Análisis',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-            Text(
-              widget.home
-                  ? 'Tus movimientos del periodo'
-                  : 'Compara ingresos y gastos',
-            ),
-            const SizedBox(height: 12),
-            RangeControls(range: _range, onChange: _setRange),
-            const SizedBox(height: 12),
-            if (widget.home) const _HomeConnections(),
-            data.when(
-              loading: () => const Padding(
-                padding: EdgeInsets.symmetric(vertical: 24),
-                child: LinearProgressIndicator(
-                  semanticsLabel: 'Cargando movimientos',
+    final overview = _view == _AnalysisView.chart;
+    final isTable = _view == _AnalysisView.table;
+    return PopScope(
+      canPop: overview,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && !overview) _open(_AnalysisView.chart);
+      },
+      child: Scaffold(
+        appBar: overview
+            ? brandBar()
+            : appBackBar('Análisis', () => _open(_AnalysisView.chart)),
+        bottomNavigationBar: widget.home
+            ? Padding(
+                padding: const EdgeInsets.fromLTRB(20, 6, 20, 8),
+                child: _registerButton(),
+              )
+            : null,
+        body: RefreshIndicator(
+          onRefresh: () => ref
+              .refresh(provider.future)
+              .then<void>((_) {}, onError: (Object _) {}),
+          child: ListView(
+            key: PageStorageKey(widget.home ? 'home' : _view),
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: screenPadding,
+            children: [
+              PageHeading(
+                widget.home
+                    ? (name == null || name.isEmpty ? 'Inicio' : 'Hola, $name')
+                    : switch (_view) {
+                        _AnalysisView.chart => 'Análisis',
+                        _AnalysisView.breakdowns => 'Desgloses',
+                        _AnalysisView.table => 'Tabla de datos',
+                      },
+                eyebrow: widget.home
+                    ? 'RESUMEN'
+                    : isTable
+                    ? null
+                    : _view == _AnalysisView.breakdowns
+                    ? 'ANÁLISIS'
+                    : 'EVOLUCIÓN',
+                description: widget.home
+                    ? 'Tus movimientos del periodo.'
+                    : switch (_view) {
+                        _AnalysisView.chart =>
+                          'Compara los movimientos del periodo.',
+                        _AnalysisView.breakdowns =>
+                          '${periodLabel(_range.from, _range.to)} · ${_range.currency}',
+                        _AnalysisView.table => comparisonLabel(_range),
+                      },
+              ),
+              SizedBox(height: widget.home ? 5 : 8),
+              if (overview) ...[
+                RangeControls(
+                  menuKey: _periodMenu,
+                  range: _range,
+                  onChange: _setRange,
                 ),
+                SizedBox(height: widget.home ? 4 : 8),
+              ] else if (isTable) ...[
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: AppBadge(_range.currency, icon: Icons.toll_outlined),
+                ),
+                const SizedBox(height: 12),
+              ],
+              data.when(
+                loading: () => _LoadingPanel(home: widget.home),
+                error: (error, _) => AppPanel(
+                  child: RetryMessage(error, () => ref.invalidate(provider)),
+                ),
+                data: (report) => _report(report),
               ),
-              error: (error, _) =>
-                  RetryMessage(error, () => ref.invalidate(provider)),
-              data: (report) => Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (widget.home) ...[
-                    _Totals(report: report, currency: _range.currency),
-                    const SizedBox(height: 8),
-                  ],
-                  if (report.empty)
-                    Card(
-                      child: Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Aún no hay movimientos en este periodo',
-                              style: Theme.of(context).textTheme.titleMedium,
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              '${dayLabel(_range.from)} – ${dayLabel(_range.to)} · ${_range.currency}',
-                            ),
-                            if (!widget.home)
-                              TextButton(
-                                onPressed: () => context.push(_newPath),
-                                child: const Text('Registrar movimiento'),
-                              ),
-                          ],
-                        ),
-                      ),
-                    )
-                  else ...[
-                    _chartCard(report),
-                    if (!widget.home) ...[
-                      if (report.series
-                              .where((bucket) => bucket.from == _selected?.from)
-                              .firstOrNull
-                          case final bucket?)
-                        _selection(bucket),
-                      _BreakdownCard(
-                        title: 'Gastos por categoría',
-                        rows: report.expenseCategories,
-                        labels: categories,
-                        currency: _range.currency,
-                        total: report.expense,
-                        color: expenseColor,
-                        onTap: (key) =>
-                            _movements({'tab': 'expense', 'category': key}),
-                      ),
-                      _BreakdownCard(
-                        title: 'Ingresos por origen de registro',
-                        rows: report.incomeSources,
-                        labels: movementSources,
-                        currency: _range.currency,
-                        total: report.income,
-                        color: incomeColor,
-                        onTap: (key) =>
-                            _movements({'tab': 'income', 'source': key}),
-                      ),
-                    ],
-                  ],
-                  if (widget.home) ...[
-                    _HomeActivity(range: _range, onAll: _movements),
-                    FilledButton.icon(
-                      onPressed: () => context.push(_newPath),
-                      icon: const Icon(Icons.add),
-                      label: const Text('Registrar movimiento'),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ],
+              if (widget.home) const _HomeConnections(),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  Widget _chartCard(Analytics report) => Card(
-    child: Padding(
-      padding: const EdgeInsets.all(14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+  Widget _registerButton() => FilledButton.icon(
+    onPressed: () => context.push(_newPath),
+    icon: const Icon(Icons.add_rounded),
+    label: const Text('Registrar movimiento'),
+  );
+
+  Widget _report(Analytics report) {
+    final bucket = report.series
+        .where((item) => item.from == _selected?.from)
+        .firstOrNull;
+    if (_view == _AnalysisView.table) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Wrap(
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: 8,
-            children: [
-              Text(
-                'Ingresos vs. gastos',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              TextButton(
-                onPressed: widget.home
-                    ? () => context.go(
-                        financePath('/analysis', rangeQuery(_range)),
-                      )
-                    : () => setState(() => _table = !_table),
-                child: Text(
-                  widget.home
-                      ? 'Ver análisis'
-                      : _table
-                      ? 'Ver gráfica'
-                      : 'Ver tabla',
-                ),
-              ),
-            ],
+          FinanceDataTable(
+            report: report,
+            range: _range,
+            selected: bucket,
+            select: (value) => setState(() => _selected = value),
           ),
-          const Wrap(
-            spacing: 14,
-            children: [
-              _Legend('Ingresos', incomeColor, Icons.south_west),
-              _Legend('Gastos', expenseColor, Icons.north_east),
-            ],
+          const SizedBox(height: 14),
+          OutlinedButton.icon(
+            onPressed: () => _open(_AnalysisView.chart),
+            icon: const Icon(Icons.bar_chart_rounded),
+            label: const Text('Volver a la gráfica'),
           ),
-          if (_table)
-            _DataTable(
-              report: report,
-              currency: _range.currency,
-              select: (bucket) => setState(() => _selected = bucket),
-            )
-          else
-            _Chart(
-              report: report,
-              range: _range,
-              compact: widget.home,
-              selected: _selected,
-              select: widget.home
-                  ? (_) =>
-                        context.go(financePath('/analysis', rangeQuery(_range)))
-                  : (bucket) => setState(() => _selected = bucket),
-            ),
+          if (bucket != null) _bucketLink(bucket),
         ],
-      ),
+      );
+    }
+    if (_view == _AnalysisView.breakdowns) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          BreakdownCard(
+            title: 'Gastos por categoría',
+            rows: report.expenseCategories,
+            labels: categories,
+            currency: _range.currency,
+            total: report.expense,
+            tone: AppTone.expense,
+            onTap: (key) => _movements({'tab': 'expense', 'category': key}),
+          ),
+          const SizedBox(height: 12),
+          BreakdownCard(
+            title: 'Ingresos por origen de registro',
+            rows: report.incomeSources,
+            labels: movementSources,
+            currency: _range.currency,
+            total: report.income,
+            tone: AppTone.income,
+            onTap: (key) => _movements({'tab': 'income', 'source': key}),
+          ),
+          const SizedBox(height: 12),
+          const AppNotice(
+            icon: Icons.filter_list_rounded,
+            title: 'Detalle por categoría u origen',
+            description: 'Toca una barra para consultar sus movimientos.',
+          ),
+        ],
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (widget.home) ...[
+          _Totals(report: report, currency: _range.currency),
+          const SizedBox(height: 10),
+        ],
+        if (report.empty)
+          _emptyPanel()
+        else ...[
+          _chartCard(report, bucket),
+          if (!widget.home) ...[
+            if (bucket != null) ...[
+              const SizedBox(height: 10),
+              _selection(bucket),
+            ],
+            const SizedBox(height: 10),
+            _breakdownLink(report),
+          ],
+        ],
+        if (widget.home) _HomeActivity(range: _range, onAll: _movements),
+      ],
+    );
+  }
+
+  Widget _emptyPanel() => AppPanel(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            const IconTile(Icons.bar_chart_rounded),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Aún no hay movimientos en este periodo',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    '${periodLabel(_range.from, _range.to)} · ${_range.currency}',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        if (widget.home)
+          OutlinedButton(
+            onPressed: () => _periodMenu.currentState?.showButtonMenu(),
+            child: const Text('Cambiar periodo'),
+          )
+        else
+          FormPair(
+            first: _registerButton(),
+            second: OutlinedButton(
+              onPressed: () => _periodMenu.currentState?.showButtonMenu(),
+              child: const Text('Cambiar periodo'),
+            ),
+          ),
+      ],
     ),
   );
 
-  Widget _selection(Bucket bucket) => Card(
-    color: Theme.of(context).colorScheme.primaryContainer,
-    child: Padding(
-      padding: const EdgeInsets.all(14),
+  Widget _chartCard(Analytics report, Bucket? bucket) {
+    final text = Theme.of(context).textTheme;
+    return AppPanel(
+      padding: EdgeInsets.fromLTRB(
+        14,
+        widget.home ? 2 : 7,
+        14,
+        widget.home ? 6 : 12,
+      ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(bucket.label, style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 6),
-          Wrap(
-            spacing: 16,
-            runSpacing: 6,
+          SectionHeading(
+            'Ingresos vs. gastos',
+            compact: widget.home,
+            action: _inlineAction(
+              widget.home ? 'Ver análisis' : 'Ver tabla',
+              widget.home ? _openAnalysis : () => _open(_AnalysisView.table),
+            ),
+          ),
+          Row(
             children: [
-              Text(
-                'Ingresos ${money(bucket.income, _range.currency)}',
-                style: const TextStyle(color: incomeColor),
+              const Expanded(
+                child: Wrap(
+                  spacing: 12,
+                  runSpacing: 4,
+                  children: [
+                    SeriesLegend('Ingresos', AppTone.income),
+                    SeriesLegend('Gastos', AppTone.expense),
+                  ],
+                ),
               ),
-              Text(
-                'Gastos ${money(bucket.expense, _range.currency)}',
-                style: const TextStyle(color: expenseColor),
-              ),
+              if (!widget.home) Text(_range.currency, style: text.labelSmall),
             ],
           ),
-          TextButton.icon(
-            onPressed: () => _movements({'from': bucket.from, 'to': bucket.to}),
-            icon: const Icon(Icons.arrow_forward),
-            label: const Text('Ver movimientos'),
+          const SizedBox(height: 5),
+          FinanceChart(
+            report: report,
+            range: _range,
+            compact: widget.home,
+            selected: bucket,
+            select: widget.home
+                ? (_) => _openAnalysis()
+                : (value) => setState(() => _selected = value),
           ),
         ],
       ),
+    );
+  }
+
+  void _openAnalysis() =>
+      context.go(financePath('/analysis', rangeQuery(_range)));
+
+  Widget _breakdownLink(Analytics report) {
+    final labels = report.expenseCategories
+        .map((row) => categories[row.key] ?? row.key)
+        .join(' · ');
+    final text = Theme.of(context).textTheme;
+    return AppPanel(
+      padding: const EdgeInsets.fromLTRB(14, 3, 14, 9),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SectionHeading(
+            'Gastos por categoría',
+            compact: true,
+            action: _inlineAction(
+              'Ver desgloses',
+              () => _open(_AnalysisView.breakdowns),
+            ),
+          ),
+          Text(
+            labels.isEmpty
+                ? 'Consulta los gastos e ingresos del periodo.'
+                : labels,
+            style: text.bodySmall,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _bucketLink(Bucket bucket) => OutlinedButton.icon(
+    onPressed: () => _movements({'from': bucket.from, 'to': bucket.to}),
+    icon: const Icon(Icons.arrow_forward_rounded),
+    label: const Text('Ver movimientos'),
+  );
+
+  Widget _selection(Bucket bucket) => Container(
+    padding: const EdgeInsets.all(14),
+    decoration: BoxDecoration(
+      color: AppColors.blueTint,
+      borderRadius: BorderRadius.circular(17),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          bucket.from == bucket.to
+              ? DateFormat(
+                  "d 'de' MMMM",
+                  'es_CO',
+                ).format(DateTime.parse(bucket.from))
+              : periodLabel(bucket.from, bucket.to),
+          style: Theme.of(
+            context,
+          ).textTheme.titleMedium?.copyWith(color: AppColors.accent),
+        ),
+        const SizedBox(height: 8),
+        FormPair(
+          first: _SelectedAmount(
+            'Ingresos',
+            bucket.income,
+            _range.currency,
+            AppTone.income,
+          ),
+          second: _SelectedAmount(
+            'Gastos',
+            bucket.expense,
+            _range.currency,
+            AppTone.expense,
+          ),
+        ),
+        const SizedBox(height: 10),
+        _bucketLink(bucket),
+      ],
     ),
   );
 }
+
+Widget _inlineAction(String label, VoidCallback onPressed) => Align(
+  alignment: Alignment.centerRight,
+  widthFactor: 1,
+  child: TextButton(
+    onPressed: onPressed,
+    style: TextButton.styleFrom(
+      padding: const EdgeInsets.only(left: 8),
+      minimumSize: const Size(0, 32),
+      textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    ),
+    child: Text(label, textAlign: TextAlign.end),
+  ),
+);
 
 class RangeControls extends StatelessWidget {
   const RangeControls({
@@ -277,10 +418,15 @@ class RangeControls extends StatelessWidget {
     required this.range,
     required this.onChange,
     this.showCurrency = true,
+    this.showDate = true,
+    this.additional = const [],
+    this.menuKey,
   });
   final FinanceRange range;
   final ValueChanged<FinanceRange> onChange;
-  final bool showCurrency;
+  final bool showCurrency, showDate;
+  final List<Widget> additional;
+  final GlobalKey<PopupMenuButtonState<String>>? menuKey;
 
   @override
   Widget build(BuildContext context) {
@@ -296,16 +442,18 @@ class RangeControls extends StatelessWidget {
     final selected = options.entries
         .where((e) => e.value.from == range.from && e.value.to == range.to)
         .firstOrNull;
-    return Wrap(
+    final filters = Wrap(
       crossAxisAlignment: WrapCrossAlignment.center,
-      spacing: 12,
+      spacing: 5,
       children: [
         PopupMenuButton<String>(
-          key: const ValueKey('home-period'),
+          key: menuKey,
           tooltip: 'Cambiar periodo',
-          child: Chip(
-            label: Text(selected?.key ?? 'Personalizado'),
-            avatar: const Icon(Icons.calendar_month, size: 18),
+          child: FilterLabel(
+            key: const ValueKey('home-period'),
+            selected?.key ?? 'Personalizado',
+            icon: additional.isEmpty ? Icons.calendar_month_outlined : null,
+            highlighted: true,
           ),
           itemBuilder: (_) => [
             for (final key in options.keys)
@@ -336,18 +484,33 @@ class RangeControls extends StatelessWidget {
           },
         ),
         if (showCurrency)
-          DropdownButton<String>(
-            value: range.currency,
-            items: [
+          PopupMenuButton<String>(
+            tooltip: 'Moneda',
+            initialValue: range.currency,
+            child: FilterLabel(range.currency),
+            itemBuilder: (_) => [
               for (final currency in currencies.keys)
-                DropdownMenuItem(value: currency, child: Text(currency)),
+                PopupMenuItem(value: currency, child: Text(currency)),
             ],
-            onChanged: (value) =>
-                onChange((from: range.from, to: range.to, currency: value!)),
+            onSelected: (value) =>
+                onChange((from: range.from, to: range.to, currency: value)),
           ),
-        Text(
-          '${dayLabel(range.from)} – ${dayLabel(range.to)}',
-          style: Theme.of(context).textTheme.labelSmall,
+        ...additional,
+      ],
+    );
+    if (!showDate) return filters;
+    final dates = Text(
+      periodLabel(range.from, range.to),
+      textAlign: TextAlign.end,
+      style: Theme.of(context).textTheme.labelSmall,
+    );
+    return Row(
+      children: [
+        Expanded(flex: 7, child: filters),
+        const SizedBox(width: 6),
+        Flexible(
+          flex: 4,
+          child: Align(alignment: Alignment.centerRight, child: dates),
         ),
       ],
     );
@@ -372,22 +535,41 @@ class _HomeConnectionsState extends ConsumerState<_HomeConnections> {
         mailboxes.any((item) => item.state == 'active')) {
       return const SizedBox.shrink();
     }
-    return Card(
-      child: ListTile(
-        leading: const Icon(Icons.mail_outline),
-        title: Text(
-          mailboxes.any((item) => item.state == 'reconnect')
-              ? 'Revisa tus buzones'
-              : 'Vincular Gmail',
+    final reconnect = mailboxes.any((item) => item.state == 'reconnect');
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: AppPanel(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            AppNotice(
+              icon: Icons.mark_email_unread_outlined,
+              title: reconnect
+                  ? 'Revisa tus buzones'
+                  : 'Importa tus avisos bancarios',
+              description: reconnect
+                  ? 'Reconecta tu buzón para seguir recibiendo avisos.'
+                  : 'Vincula el Gmail donde recibes avisos o empieza con el registro manual.',
+              tone: reconnect ? AppTone.warning : AppTone.info,
+            ),
+            const SizedBox(height: 10),
+            FormPair(
+              first: FilledButton.icon(
+                onPressed: () => context.go('/settings/mailboxes'),
+                icon: Icon(
+                  reconnect ? Icons.refresh_rounded : Icons.add_rounded,
+                ),
+                label: Text(reconnect ? 'Ver buzones' : 'Vincular Gmail'),
+              ),
+              second: OutlinedButton(
+                onPressed: () => setState(() => _dismissed = true),
+                child: const Text('Más tarde'),
+              ),
+              firstFlex: 3,
+              secondFlex: 2,
+            ),
+          ],
         ),
-        subtitle: const Text(
-          'Consulta los avisos por correo o registra movimientos manualmente.',
-        ),
-        trailing: TextButton(
-          onPressed: () => setState(() => _dismissed = true),
-          child: const Text('Más tarde'),
-        ),
-        onTap: () => context.go('/settings/mailboxes'),
       ),
     );
   }
@@ -410,8 +592,7 @@ class _HomeActivity extends ConsumerWidget {
           )),
         )
         .asData
-        ?.value
-        .items;
+        ?.value;
     final recent =
         ref
             .watch(
@@ -431,72 +612,136 @@ class _HomeActivity extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (pending?.isNotEmpty ?? false)
-          Card(
-            color: const Color(0xfffff1d8),
-            child: ListTile(
-              leading: const Icon(
-                Icons.mark_email_unread_outlined,
-                color: Color(0xff8a4b08),
-              ),
-              title: const Text('Ver avisos pendientes'),
-              subtitle: Text(pending!.first.pendingExplanation),
-              onTap: () => onAll({'tab': 'notices', 'status': 'pending'}),
-            ),
+        if (pending != null && pending.items.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          AppNotice(
+            icon: Icons.mark_email_unread_outlined,
+            compact: true,
+            tone: AppTone.warning,
+            title: pending.hasMore
+                ? 'Avisos pendientes'
+                : pending.items.length == 1
+                ? '1 aviso pendiente'
+                : '${pending.items.length} avisos pendientes',
+            description:
+                '${pending.items.first.providerLabel} · ${noticePreview(pending.items.first)}',
+            onTap: () => onAll({'tab': 'notices', 'status': 'pending'}),
           ),
+        ],
         if (recent.isNotEmpty) ...[
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Movimientos recientes'),
-            trailing: TextButton(
-              onPressed: () => onAll(),
-              child: const Text('Ver todos'),
-            ),
+          const SizedBox(height: 4),
+          SectionHeading(
+            'Movimientos recientes',
+            action: _inlineAction('Ver todos', () => onAll()),
           ),
           for (final item in recent.take(3))
-            MovementTile(
-              item,
-              onTap: () => context.push('/history/movement/${item.id}'),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Card(
+                child: MovementRow(
+                  item,
+                  onTap: () => context.push('/history/movement/${item.id}'),
+                ),
+              ),
             ),
         ],
-        const SizedBox(height: 8),
       ],
     );
   }
 }
 
-class MovementTile extends StatelessWidget {
-  const MovementTile(this.item, {super.key, this.onTap});
+class MovementRow extends StatelessWidget {
+  const MovementRow(
+    this.item, {
+    super.key,
+    this.onTap,
+    this.showCurrency = false,
+  });
   final Movement item;
   final VoidCallback? onTap;
+  final bool showCurrency;
 
   @override
   Widget build(BuildContext context) {
-    final color = item.income ? incomeColor : expenseColor;
-    return Card(
-      child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor: item.income ? incomeSurface : expenseSurface,
-          child: Icon(
-            item.income ? Icons.south_west : Icons.north_east,
-            color: color,
-          ),
+    final tone = item.income ? AppTone.income : AppTone.expense;
+    final text = Theme.of(context).textTheme;
+    final amount = showCurrency
+        ? '${item.currency} ${displayMoney(item.minor, item.currency, symbol: false)}'
+        : displayMoney(item.minor, item.currency);
+    final label = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          item.title,
+          style: text.titleMedium,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
         ),
-        title: Text(item.title),
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        const SizedBox(height: 2),
+        Text(
+          '${categories[item.category] ?? item.category} · ${movementSources[item.source] ?? item.source}',
+          style: text.bodySmall,
+        ),
+      ],
+    );
+    final value = Text(
+      '${item.income ? '+' : '−'} $amount',
+      semanticsLabel: '${item.kind}, ${item.signedAmount}',
+      textAlign: TextAlign.end,
+      style: text.titleMedium?.copyWith(
+        color: tone.ink,
+        fontFeatures: tabularFigures,
+      ),
+    );
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        child: Row(
           children: [
-            Text(
-              item.signedAmount,
-              style: TextStyle(color: color, fontWeight: FontWeight.bold),
+            IconTile(
+              item.income ? Icons.south_west_rounded : Icons.north_east_rounded,
+              tone: tone,
+              size: 36,
             ),
-            Text(
-              '${item.kind} · ${categories[item.category] ?? item.category} · ${movementSources[item.source]}',
+            const SizedBox(width: 10),
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final stacked =
+                      constraints.maxWidth < 210 ||
+                      MediaQuery.textScalerOf(context).scale(14) > 18;
+                  final amounts = Column(
+                    crossAxisAlignment: stacked
+                        ? CrossAxisAlignment.start
+                        : CrossAxisAlignment.end,
+                    children: [
+                      value,
+                      if (item.method case final method?
+                          when method.trim().isNotEmpty)
+                        Text(
+                          method,
+                          style: text.bodySmall,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                    ],
+                  );
+                  return stacked
+                      ? Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [label, const SizedBox(height: 4), amounts],
+                        )
+                      : TrailingRow(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          leading: label,
+                          trailing: amounts,
+                        );
+                },
+              ),
             ),
           ],
         ),
-        trailing: onTap == null ? null : const Icon(Icons.chevron_right),
-        onTap: onTap,
       ),
     );
   }
@@ -508,338 +753,178 @@ class _Totals extends StatelessWidget {
   final String currency;
 
   @override
-  Widget build(BuildContext context) {
-    final title = Theme.of(context).textTheme.titleLarge;
-    final cards = [
-      for (final (label, color, bg, value, icon) in [
-        (
-          'Ingresos',
-          incomeColor,
-          incomeSurface,
-          report.income,
-          Icons.south_west,
-        ),
-        (
-          'Gastos',
-          expenseColor,
-          expenseSurface,
-          report.expense,
-          Icons.north_east,
-        ),
-      ])
-        Card(
-          color: bg,
-          child: Padding(
-            padding: const EdgeInsets.all(13),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _Legend(label, color, icon),
-                const SizedBox(height: 5),
-                Text(
-                  money(value, currency),
-                  style: title?.copyWith(
-                    color: color,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-    ];
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (MediaQuery.textScalerOf(context).scale(16) > 21)
-          ...cards
-        else
-          Row(children: [for (final card in cards) Expanded(child: card)]),
-        Card(
-          color: ink,
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Balance del periodo',
-                  style: TextStyle(color: Color(0xffd9dff7)),
-                ),
-                Text(
-                  '${report.balance > BigInt.zero ? '+ ' : ''}${money(report.balance, currency)}',
-                  style: title?.copyWith(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _Legend extends StatelessWidget {
-  const _Legend(this.label, this.color, this.icon);
-  final String label;
-  final Color color;
-  final IconData icon;
-
-  @override
-  Widget build(BuildContext context) => Wrap(
-    crossAxisAlignment: WrapCrossAlignment.center,
-    spacing: 4,
-    children: [
-      Icon(icon, color: color, size: 16),
-      Text(
-        label,
-        style: TextStyle(color: color, fontWeight: FontWeight.w700),
-      ),
-    ],
-  );
-}
-
-class _Chart extends StatelessWidget {
-  const _Chart({
-    required this.report,
-    required this.range,
-    required this.compact,
-    required this.selected,
-    required this.select,
-  });
-  final Analytics report;
-  final FinanceRange range;
-  final bool compact;
-  final Bucket? selected;
-  final ValueChanged<Bucket> select;
-
-  @override
-  Widget build(BuildContext context) {
-    final max = report.series.fold(BigInt.zero, (result, bucket) {
-      final peak = bucket.income > bucket.expense
-          ? bucket.income
-          : bucket.expense;
-      return peak > result ? peak : result;
-    });
-    final height = compact ? 75.0 : 132.0;
-    final axis = DateFormat('d/M');
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Text(
-          'Escala común · ${money(BigInt.zero, range.currency)} – ${money(max, range.currency)}',
-          style: Theme.of(context).textTheme.labelSmall,
-        ),
-        const SizedBox(height: 6),
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final width = math.max(
-              compact ? 27.0 : 43.0,
-              constraints.maxWidth / report.series.length,
-            );
-            return SizedBox(
-              height: height + MediaQuery.textScalerOf(context).scale(30),
-              child: ListView.builder(
-                itemExtent: width,
-                scrollDirection: Axis.horizontal,
-                itemCount: report.series.length,
-                itemBuilder: (context, index) {
-                  final bucket = report.series[index];
-                  final chosen = selected?.from == bucket.from;
-                  return Semantics(
-                    button: true,
-                    selected: chosen,
-                    label:
-                        '${bucket.label}. Ingresos ${money(bucket.income, range.currency)}. Gastos ${money(bucket.expense, range.currency)}.',
-                    child: InkWell(
-                      onTap: () => select(bucket),
-                      child: ExcludeSemantics(
-                        child: Column(
-                          children: [
-                            Container(
-                              height: height,
-                              decoration: BoxDecoration(
-                                color: chosen
-                                    ? Theme.of(
-                                        context,
-                                      ).colorScheme.primaryContainer
-                                    : null,
-                                border: Border(
-                                  bottom: BorderSide(
-                                    color: Theme.of(context).dividerColor,
-                                  ),
-                                ),
-                              ),
-                              alignment: Alignment.bottomCenter,
-                              child: Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: [
-                                  _bar(height, bucket.income, max, incomeColor),
-                                  const SizedBox(width: 3),
-                                  _bar(
-                                    height,
-                                    bucket.expense,
-                                    max,
-                                    expenseColor,
-                                  ),
-                                ],
-                              ),
-                            ),
-                            Text(
-                              axis.format(DateTime.parse(bucket.from)),
-                              maxLines: 1,
-                              overflow: TextOverflow.clip,
-                              style: Theme.of(context).textTheme.labelSmall,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-            );
-          },
-        ),
-      ],
-    );
-  }
-
-  Widget _bar(double height, BigInt value, BigInt max, Color color) =>
-      Container(
-        width: compact ? 7 : 10,
-        height: max == BigInt.zero
-            ? 0
-            : height * value.toDouble() / max.toDouble(),
-        decoration: BoxDecoration(
-          color: color,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(4)),
-        ),
-      );
-}
-
-class _DataTable extends StatelessWidget {
-  const _DataTable({
-    required this.report,
-    required this.currency,
-    required this.select,
-  });
-  final Analytics report;
-  final String currency;
-  final ValueChanged<Bucket> select;
-
-  @override
   Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      Table(
-        defaultVerticalAlignment: TableCellVerticalAlignment.middle,
-        border: TableBorder(
-          horizontalInside: BorderSide(color: Theme.of(context).dividerColor),
+      FormPair(
+        first: _total(
+          context,
+          'Ingresos',
+          report.income,
+          AppTone.income,
+          Icons.south_west_rounded,
         ),
-        children: [
-          TableRow(
-            children: [
-              _cell('Periodo', bold: true),
-              _cell('Ingresos', color: incomeColor, bold: true),
-              _cell('Gastos', color: expenseColor, bold: true),
-            ],
-          ),
-          for (final bucket in report.series)
-            TableRow(
+        second: _total(
+          context,
+          'Gastos',
+          report.expense,
+          AppTone.expense,
+          Icons.north_east_rounded,
+        ),
+      ),
+      const SizedBox(height: 9),
+      Container(
+        padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+        decoration: BoxDecoration(
+          color: AppColors.ink,
+          borderRadius: BorderRadius.circular(18),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Balance del periodo',
+              style: Theme.of(
+                context,
+              ).textTheme.labelMedium?.copyWith(color: AppColors.blueTint),
+            ),
+            const SizedBox(height: 2),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                InkWell(
-                  onTap: () => select(bucket),
-                  child: _cell(
-                    bucket.label,
-                    color: Theme.of(context).colorScheme.primary,
+                Expanded(
+                  child: Text(
+                    '${report.balance > BigInt.zero ? '+ ' : ''}${displayMoney(report.balance, currency)}',
+                    semanticsLabel: money(report.balance, currency),
+                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                      color: AppColors.surface,
+                      fontFeatures: tabularFigures,
+                    ),
                   ),
                 ),
-                _cell(money(bucket.income, currency), color: incomeColor),
-                _cell(money(bucket.expense, currency), color: expenseColor),
+                const SizedBox(width: 6),
+                Text(
+                  currency,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.labelSmall?.copyWith(color: AppColors.blueTint),
+                ),
               ],
             ),
-          TableRow(
-            children: [
-              _cell('Total', bold: true),
-              _cell(
-                money(report.income, currency),
-                color: incomeColor,
-                bold: true,
-              ),
-              _cell(
-                money(report.expense, currency),
-                color: expenseColor,
-                bold: true,
-              ),
-            ],
-          ),
-        ],
+          ],
+        ),
       ),
-      Text('Balance del periodo · ${money(report.balance, currency)}'),
     ],
   );
 
-  Widget _cell(String value, {Color? color, bool bold = false}) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
-    child: Text(
-      value,
-      style: TextStyle(color: color, fontWeight: bold ? FontWeight.bold : null),
+  Widget _total(
+    BuildContext context,
+    String label,
+    BigInt value,
+    AppTone tone,
+    IconData icon,
+  ) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(11),
+    decoration: BoxDecoration(
+      color: tone.tint,
+      borderRadius: BorderRadius.circular(18),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SeriesLegend(label, tone, icon: icon),
+        const SizedBox(height: 6),
+        Text(
+          displayMoney(value, currency),
+          semanticsLabel: money(value, currency),
+          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+            color: tone.ink,
+            fontFeatures: tabularFigures,
+          ),
+        ),
+        Text(
+          currency,
+          style: Theme.of(
+            context,
+          ).textTheme.labelSmall?.copyWith(color: tone.ink),
+        ),
+      ],
     ),
   );
 }
 
-class _BreakdownCard extends StatelessWidget {
-  const _BreakdownCard({
-    required this.title,
-    required this.rows,
-    required this.labels,
-    required this.currency,
-    required this.total,
-    required this.color,
-    required this.onTap,
-  });
-  final String title, currency;
-  final List<Breakdown> rows;
-  final Map<String, String> labels;
-  final BigInt total;
-  final Color color;
-  final ValueChanged<String> onTap;
+class _SelectedAmount extends StatelessWidget {
+  const _SelectedAmount(this.label, this.amount, this.currency, this.tone);
+  final String label, currency;
+  final BigInt amount;
+  final AppTone tone;
 
   @override
-  Widget build(BuildContext context) => Card(
-    child: Padding(
-      padding: const EdgeInsets.all(14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(title, style: Theme.of(context).textTheme.titleMedium),
-          if (rows.isEmpty) const Text('Sin movimientos para este desglose.'),
-          for (final row in rows)
-            InkWell(
-              onTap: () => onTap(row.key),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 9),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '${labels[row.key] ?? row.key} · ${money(row.amount, currency)}',
-                    ),
-                    const SizedBox(height: 4),
-                    LinearProgressIndicator(
-                      value: row.amount.toDouble() / total.toDouble(),
-                      color: color,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-        ],
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        label,
+        style: Theme.of(
+          context,
+        ).textTheme.labelMedium?.copyWith(color: tone.ink),
       ),
+      Text(
+        displayMoney(amount, currency),
+        semanticsLabel: money(amount, currency),
+        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+          color: tone.ink,
+          fontFeatures: tabularFigures,
+        ),
+      ),
+    ],
+  );
+}
+
+class _LoadingPanel extends StatelessWidget {
+  const _LoadingPanel({required this.home});
+  final bool home;
+
+  @override
+  Widget build(BuildContext context) => AppPanel(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'Cargando tus movimientos…',
+          style: Theme.of(
+            context,
+          ).textTheme.titleMedium?.copyWith(color: AppColors.accent),
+        ),
+        const SizedBox(height: 10),
+        if (home) ...[
+          FormPair(
+            first: _block(AppColors.incomeTint, 48),
+            second: _block(AppColors.expenseTint, 48),
+          ),
+          const SizedBox(height: 12),
+        ],
+        const LinearProgressIndicator(
+          semanticsLabel: 'Cargando movimientos',
+          minHeight: 5,
+          borderRadius: BorderRadius.all(Radius.circular(4)),
+        ),
+        const SizedBox(height: 8),
+        FractionallySizedBox(
+          alignment: Alignment.centerLeft,
+          widthFactor: .65,
+          child: _block(AppColors.neutralTint, 6),
+        ),
+      ],
+    ),
+  );
+
+  Widget _block(Color color, double height) => Container(
+    height: height,
+    decoration: BoxDecoration(
+      color: color,
+      borderRadius: BorderRadius.circular(8),
     ),
   );
 }

@@ -8,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import 'package:timezone/data/latest.dart' as tz;
 
 import 'core/api.dart';
+import 'core/design.dart';
 import 'core/widgets.dart';
 import 'features/auth/auth.dart';
 import 'features/auth/profile.dart';
@@ -25,7 +26,9 @@ void main() {
 }
 
 final routerProvider = Provider((ref) {
+  final rootNavigator = GlobalKey<NavigatorState>();
   final router = GoRouter(
+    navigatorKey: rootNavigator,
     initialLocation: '/loading',
     redirect: (context, route) {
       final auth = ref.read(authProvider);
@@ -73,6 +76,7 @@ final routerProvider = Provider((ref) {
                 routes: [
                   GoRoute(
                     path: 'new',
+                    parentNavigatorKey: rootNavigator,
                     builder: (_, state) => MovementForm(
                       direction: state.uri.queryParameters['direction'],
                       currency: state.uri.queryParameters['currency'],
@@ -85,6 +89,7 @@ final routerProvider = Provider((ref) {
                     routes: [
                       GoRoute(
                         path: 'edit',
+                        parentNavigatorKey: rootNavigator,
                         builder: (_, state) => MovementScreen(
                           state.pathParameters['id']!,
                           editing: true,
@@ -99,6 +104,7 @@ final routerProvider = Provider((ref) {
                     routes: [
                       GoRoute(
                         path: 'confirm',
+                        parentNavigatorKey: rootNavigator,
                         builder: (_, state) => NoticeScreen(
                           state.pathParameters['id']!,
                           confirming: true,
@@ -288,7 +294,11 @@ class _MailGastoAppState extends ConsumerState<MailGastoApp> {
     if (!mounted) return;
     if (ref.read(apiProvider).session == session && session != null) {
       ref.invalidate(mailboxesProvider);
-      _messenger.currentState?.showSnackBar(SnackBar(content: Text(message)));
+      if (cancelled) {
+        ref.read(mailboxFeedbackProvider.notifier).cancel();
+      } else {
+        _messenger.currentState?.showSnackBar(SnackBar(content: Text(message)));
+      }
     }
     if (_pending != null) unawaited(_resumeLink());
   }
@@ -343,13 +353,6 @@ class _MailGastoAppState extends ConsumerState<MailGastoApp> {
         });
       }
     });
-    final colors = ColorScheme.fromSeed(seedColor: const Color(0xFF2945DB))
-        .copyWith(
-          primary: const Color(0xFF2945DB),
-          onPrimary: Colors.white,
-          surface: const Color(0xFFF5F7FF),
-          onSurface: const Color(0xFF111A40),
-        );
     return MaterialApp.router(
       title: 'MailGasto IA',
       scaffoldMessengerKey: _messenger,
@@ -358,26 +361,7 @@ class _MailGastoAppState extends ConsumerState<MailGastoApp> {
       locale: const Locale('es', 'CO'),
       supportedLocales: const [Locale('es', 'CO')],
       localizationsDelegates: GlobalMaterialLocalizations.delegates,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: colors,
-        scaffoldBackgroundColor: colors.surface,
-        cardTheme: const CardThemeData(
-          color: Colors.white,
-          elevation: 0,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.all(Radius.circular(18)),
-            side: BorderSide(color: Color(0xFFE0E5F2)),
-          ),
-        ),
-        inputDecorationTheme: const InputDecorationTheme(
-          filled: true,
-          fillColor: Colors.white,
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.all(Radius.circular(12)),
-          ),
-        ),
-      ),
+      theme: mailGastoTheme(),
     );
   }
 }
@@ -405,34 +389,47 @@ class _MainMenu extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Scaffold(
     body: shell,
-    bottomNavigationBar: NavigationBar(
-      backgroundColor: Colors.white,
-      labelBehavior: MediaQuery.textScalerOf(context).scale(16) > 21
-          ? NavigationDestinationLabelBehavior.onlyShowSelected
-          : NavigationDestinationLabelBehavior.alwaysShow,
-      selectedIndex: shell.currentIndex,
-      onDestinationSelected: (index) =>
-          shell.goBranch(index, initialLocation: index == shell.currentIndex),
-      destinations: const [
-        NavigationDestination(
-          icon: Icon(Icons.home_outlined),
-          selectedIcon: Icon(Icons.home),
-          label: 'Inicio',
+    bottomNavigationBar: DecoratedBox(
+      decoration: const BoxDecoration(
+        border: Border(top: BorderSide(color: AppColors.border)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.only(top: 1),
+        child: NavigationBar(
+          labelBehavior:
+              MediaQuery.textScalerOf(context).scale(10.5) > 13 ||
+                  MediaQuery.sizeOf(context).width < 350
+              ? NavigationDestinationLabelBehavior.onlyShowSelected
+              : NavigationDestinationLabelBehavior.alwaysShow,
+          selectedIndex: shell.currentIndex,
+          onDestinationSelected: (index) => shell.goBranch(
+            index,
+            initialLocation: index == shell.currentIndex,
+          ),
+          destinations: const [
+            NavigationDestination(
+              icon: Icon(Icons.home_outlined),
+              label: 'Inicio',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.swap_horiz_rounded),
+              label: 'Movimientos',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.bar_chart_rounded),
+              label: 'Análisis',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.forum_outlined),
+              label: 'Asistente',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.person_outline),
+              label: 'Perfil',
+            ),
+          ],
         ),
-        NavigationDestination(
-          icon: Icon(Icons.swap_horiz),
-          label: 'Movimientos',
-        ),
-        NavigationDestination(icon: Icon(Icons.bar_chart), label: 'Análisis'),
-        NavigationDestination(
-          icon: Icon(Icons.chat_bubble_outline),
-          label: 'Asistente',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.person_outline),
-          label: 'Perfil',
-        ),
-      ],
+      ),
     ),
   );
 }

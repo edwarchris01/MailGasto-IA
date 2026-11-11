@@ -9,7 +9,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/api.dart';
+import '../../core/design.dart';
 import '../../core/google_browser.dart';
+import '../../core/widgets.dart';
 
 typedef Account = ({String id, String name, String email});
 
@@ -252,7 +254,6 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
   bool _busy = false;
   String? _message;
   bool _registered = false;
-  bool _showPassword = false;
 
   @override
   void dispose() {
@@ -305,163 +306,275 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
   }
 
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Scaffold(
-      appBar: widget.register
-          ? AppBar(title: const Text('Crear cuenta'))
-          : null,
-      body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 440),
-              child: AutofillGroup(
-                child: Form(
-                  key: _form,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      const Image(
-                        image: AssetImage('assets/brand.png'),
-                        height: 112,
-                        excludeFromSemantics: true,
+  Widget build(BuildContext context) => Scaffold(
+    appBar: widget.register
+        ? appBackBar(
+            _registered ? 'Crear cuenta' : 'Volver a iniciar sesión',
+            () {
+              if (_registered) {
+                setState(() => _registered = false);
+              } else if (context.canPop()) {
+                context.pop();
+              } else {
+                context.go('/login');
+              }
+            },
+          )
+        : brandBar(),
+    body: FormLayout(
+      child: _registered
+          ? _verification()
+          : AutofillGroup(
+              child: Form(
+                key: _form,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (widget.register) ...[
+                      const Align(
+                        alignment: Alignment.centerLeft,
+                        child: IconTile(
+                          Icons.person_add_alt_1_outlined,
+                          size: 50,
+                        ),
                       ),
                       const SizedBox(height: 16),
+                      const PageHeading(
+                        'Crear cuenta',
+                        eyebrow: 'NUEVA CUENTA',
+                        description:
+                            'Tu cuenta reúne los movimientos y las consultas.',
+                      ),
+                    ] else ...[
+                      const _AccessHero(),
+                      const SizedBox(height: 24),
+                      const PageHeading(
+                        'Iniciar sesión',
+                        description:
+                            'Consulta tus ingresos y gastos en un solo lugar.',
+                      ),
+                    ],
+                    const SizedBox(height: 20),
+                    if (widget.register) ...[
+                      LabeledField(
+                        'Nombre',
+                        child: TextFormField(
+                          key: const ValueKey('name'),
+                          controller: _name,
+                          autofillHints: const [AutofillHints.name],
+                          textInputAction: TextInputAction.next,
+                          decoration: const InputDecoration(
+                            hintText: 'Tu nombre',
+                            counterText: '',
+                          ),
+                          validator: (value) => value!.trim().isEmpty
+                              ? 'Escribe tu nombre.'
+                              : null,
+                          maxLength: 80,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                    ],
+                    LabeledField(
+                      'Correo',
+                      child: TextFormField(
+                        key: const ValueKey('email'),
+                        controller: _email,
+                        keyboardType: TextInputType.emailAddress,
+                        textInputAction: TextInputAction.next,
+                        autofillHints: const [AutofillHints.email],
+                        decoration: const InputDecoration(
+                          hintText: 'nombre@ejemplo.com',
+                        ),
+                        validator: (value) => !value!.contains('@')
+                            ? 'Escribe un correo válido.'
+                            : null,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    PasswordField(
+                      fieldKey: const ValueKey('password'),
+                      label: 'Contraseña',
+                      controller: _password,
+                      onSubmitted: (_) => _submit(),
+                      autofillHints: [
+                        widget.register
+                            ? AutofillHints.newPassword
+                            : AutofillHints.password,
+                      ],
+                      validator: (value) =>
+                          value!.length < 12 || value.length > 128
+                          ? 'Usa entre 12 y 128 caracteres.'
+                          : null,
+                    ),
+                    if (widget.register) ...[
+                      const SizedBox(height: 8),
                       Text(
-                        'MailGasto IA',
-                        style: theme.textTheme.headlineMedium,
+                        'Usa al menos 12 caracteres.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                      const SizedBox(height: 16),
+                    ] else
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton(
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.only(left: 12),
+                          ),
+                          onPressed: _busy
+                              ? null
+                              : () => context.push('/recover'),
+                          child: const Text('Olvidé mi contraseña'),
+                        ),
+                      ),
+                    if (_message case final message?) ...[
+                      AppNotice(
+                        icon: Icons.error_outline,
+                        title: message,
+                        tone: AppTone.danger,
+                      ),
+                      const SizedBox(height: 10),
+                    ],
+                    FilledButton.icon(
+                      onPressed: _busy ? null : _submit,
+                      icon: const Icon(Icons.arrow_forward_rounded),
+                      label: Text(
+                        _busy
+                            ? 'Un momento…'
+                            : widget.register
+                            ? 'Crear cuenta'
+                            : 'Iniciar sesión',
+                      ),
+                    ),
+                    if (widget.register) ...[
+                      const SizedBox(height: 20),
+                      const AppNotice(
+                        icon: Icons.mail_outline,
+                        title: 'Verificación por correo',
+                        description:
+                            'Te enviaremos un enlace para activar el acceso a tu cuenta.',
+                      ),
+                      const SizedBox(height: 14),
+                      TextButton(
+                        onPressed: _busy ? null : () => context.go('/login'),
+                        child: const Text('Ya tengo una cuenta'),
+                      ),
+                    ] else ...[
+                      const SizedBox(height: 14),
+                      const Divider(height: 1),
+                      const SizedBox(height: 14),
+                      Text(
+                        '¿Primera vez en MailGasto?',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(
+                          context,
+                        ).textTheme.bodySmall?.copyWith(fontSize: 13),
+                      ),
+                      const SizedBox(height: 9),
+                      OutlinedButton(
+                        onPressed: _busy
+                            ? null
+                            : () => context.push('/register'),
+                        child: const Text('Crear cuenta'),
                       ),
                       const SizedBox(height: 8),
-                      if (_registered) ...[
-                        Text(
-                          'Verifica tu correo',
-                          style: theme.textTheme.titleLarge,
-                        ),
-                        const Text(
-                          'Revisa tu correo y abre el enlace para verificar tu cuenta.',
-                        ),
-                        Text(_email.text.trim()),
-                        const SizedBox(height: 16),
-                        FilledButton(
-                          onPressed: () => context.go('/login'),
-                          child: const Text('Volver a iniciar sesión'),
-                        ),
-                      ] else ...[
-                        Text(
-                          widget.register
-                              ? 'Crea tu cuenta para organizar tus movimientos.'
-                              : 'Consulta tus ingresos, gastos y avisos por correo.',
-                        ),
-                        const SizedBox(height: 24),
-                        if (widget.register) ...[
-                          TextFormField(
-                            key: const ValueKey('name'),
-                            controller: _name,
-                            autofillHints: const [AutofillHints.name],
-                            textInputAction: TextInputAction.next,
-                            decoration: const InputDecoration(
-                              labelText: 'Nombre',
-                            ),
-                            validator: (value) => value!.trim().isEmpty
-                                ? 'Escribe tu nombre.'
-                                : null,
-                            maxLength: 80,
-                          ),
-                          const SizedBox(height: 12),
-                        ],
-                        TextFormField(
-                          key: const ValueKey('email'),
-                          controller: _email,
-                          keyboardType: TextInputType.emailAddress,
-                          textInputAction: TextInputAction.next,
-                          autofillHints: const [AutofillHints.email],
-                          decoration: const InputDecoration(
-                            labelText: 'Correo',
-                          ),
-                          validator: (value) => !value!.contains('@')
-                              ? 'Escribe un correo válido.'
-                              : null,
-                        ),
-                        const SizedBox(height: 12),
-                        TextFormField(
-                          key: const ValueKey('password'),
-                          controller: _password,
-                          obscureText: !_showPassword,
-                          onFieldSubmitted: (_) => _submit(),
-                          autofillHints: [
-                            widget.register
-                                ? AutofillHints.newPassword
-                                : AutofillHints.password,
-                          ],
-                          decoration: InputDecoration(
-                            labelText: 'Contraseña',
-                            suffixIcon: IconButton(
-                              tooltip: _showPassword
-                                  ? 'Ocultar contraseña'
-                                  : 'Mostrar contraseña',
-                              onPressed: () => setState(
-                                () => _showPassword = !_showPassword,
-                              ),
-                              icon: Icon(
-                                _showPassword
-                                    ? Icons.visibility_off_outlined
-                                    : Icons.visibility_outlined,
-                              ),
-                            ),
-                          ),
-                          validator: (value) =>
-                              value!.length < 12 || value.length > 128
-                              ? 'Usa entre 12 y 128 caracteres.'
-                              : null,
-                        ),
-                        if (_message case final message?) ...[
-                          const SizedBox(height: 12),
-                          Text(
-                            message,
-                            style: TextStyle(color: theme.colorScheme.error),
-                          ),
-                        ],
-                        const SizedBox(height: 20),
-                        FilledButton(
-                          onPressed: _busy ? null : _submit,
-                          child: Text(
-                            _busy
-                                ? 'Un momento…'
-                                : widget.register
-                                ? 'Registrarme'
-                                : 'Iniciar sesión',
-                          ),
-                        ),
-                        if (!widget.register) ...[
-                          TextButton(
-                            onPressed: _busy
-                                ? null
-                                : () => context.push('/recover'),
-                            child: const Text('Olvidé mi contraseña'),
-                          ),
-                          OutlinedButton.icon(
-                            icon: const Icon(Icons.account_circle_outlined),
-                            onPressed: _busy ? null : _google,
-                            label: const Text('Continuar con Google'),
-                          ),
-                          TextButton(
-                            onPressed: _busy
-                                ? null
-                                : () => context.push('/register'),
-                            child: const Text('Crear cuenta'),
-                          ),
-                        ],
-                      ],
+                      OutlinedButton.icon(
+                        icon: const Icon(Icons.account_circle_outlined),
+                        onPressed: _busy ? null : _google,
+                        label: const Text('Continuar con Google'),
+                      ),
                     ],
-                  ),
+                  ],
                 ),
               ),
             ),
-          ),
+    ),
+  );
+
+  Widget _verification() => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      const _AccessHero(markOnly: true),
+      const SizedBox(height: 24),
+      PageHeading(
+        'Verifica tu correo',
+        eyebrow: 'PASO DE SEGURIDAD',
+        description: 'Enviamos un enlace a ${_email.text.trim()}.',
+      ),
+      const SizedBox(height: 16),
+      AppPanel(
+        child: Column(
+          children: [
+            for (final (index, instruction) in const [
+              'Abre el correo de MailGasto IA.',
+              'Abre el enlace y confirma la contraseña.',
+              'Vuelve a la app e inicia sesión.',
+            ].indexed)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 5),
+                child: Row(
+                  children: [
+                    Container(
+                      constraints: const BoxConstraints(
+                        minWidth: 28,
+                        minHeight: 28,
+                      ),
+                      alignment: Alignment.center,
+                      padding: const EdgeInsets.all(4),
+                      decoration: BoxDecoration(
+                        color: AppColors.blueTint,
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                      child: Text(
+                        '${index + 1}',
+                        style: const TextStyle(
+                          color: AppColors.primary,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(child: Text(instruction)),
+                  ],
+                ),
+              ),
+          ],
         ),
       ),
-    );
-  }
+      const SizedBox(height: 22),
+      FilledButton.icon(
+        onPressed: () => context.go('/login'),
+        icon: const Icon(Icons.arrow_forward_rounded),
+        label: const Text('Volver a iniciar sesión'),
+      ),
+      const SizedBox(height: 22),
+      const AppNotice(
+        icon: Icons.mark_email_unread_outlined,
+        title: 'Revisa también el correo no deseado',
+        description: 'Busca el mensaje con el asunto «Verifica tu correo».',
+      ),
+    ],
+  );
+}
+
+class _AccessHero extends StatelessWidget {
+  const _AccessHero({this.markOnly = false});
+  final bool markOnly;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    constraints: const BoxConstraints(minHeight: 156),
+    alignment: Alignment.center,
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+    decoration: BoxDecoration(
+      color: markOnly ? AppColors.blueTint : null,
+      gradient: markOnly
+          ? null
+          : const LinearGradient(
+              colors: [AppColors.blueTint, Color(0xFFE0F5F2)],
+            ),
+      borderRadius: BorderRadius.circular(22),
+    ),
+    child: markOnly ? const BrandMark(86) : const BrandLockup(hero: true),
+  );
 }

@@ -3,11 +3,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/api.dart';
+import '../../core/design.dart';
 import '../../core/format.dart';
 import '../../core/widgets.dart';
 import 'expenses.dart';
 import 'finance.dart';
 import 'finance_screens.dart';
+import 'notice_style.dart';
 
 class MovementsScreen extends ConsumerWidget {
   const MovementsScreen(this.query, {super.key});
@@ -53,15 +55,38 @@ class MovementsScreen extends ConsumerWidget {
       category: null,
       status: query['status'],
     ));
+    final report =
+        movementFilter.direction != null &&
+            currency != null &&
+            movementFilter.category == null &&
+            movementFilter.source == null
+        ? ref.watch(analyticsProvider(period)).asData?.value
+        : null;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Movimientos')),
+      appBar: brandBar(),
+      bottomNavigationBar: notices
+          ? null
+          : Padding(
+              padding: const EdgeInsets.fromLTRB(20, 6, 20, 8),
+              child: FilledButton.icon(
+                icon: const Icon(Icons.add_rounded),
+                label: const Text('Registrar movimiento'),
+                onPressed: () => context.push(
+                  financePath('/history/new', {
+                    'currency': currency ?? 'COP',
+                    'direction': ?movementFilter.direction,
+                  }),
+                ),
+              ),
+            ),
       body: RefreshIndicator(
         onRefresh: () async {
           try {
             await (notices
                 ? ref.refresh(noticeList.future).then<void>((_) {})
                 : ref.refresh(reports.future).then<void>((_) {}));
+            if (report != null) ref.invalidate(analyticsProvider(period));
           } catch (_) {
             // El estado del proveedor presenta el error y permite reintentar.
           }
@@ -70,39 +95,33 @@ class MovementsScreen extends ConsumerWidget {
           physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
             SliverPadding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),
               sliver: SliverToBoxAdapter(
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Wrap(
-                      spacing: 7,
-                      children: [
-                        for (final entry in tabs.entries)
-                          ChoiceChip(
-                            label: Text(entry.value),
-                            selected: tab == entry.key,
-                            onSelected: (_) => _navigate(context, {
-                              'tab': entry.key,
-                              'category': null,
-                              'status': null,
-                              'source': null,
-                            }),
-                          ),
-                      ],
+                    const PageHeading('Movimientos', eyebrow: 'HISTORIAL'),
+                    const SizedBox(height: 12),
+                    SegmentTabs(
+                      items: tabs,
+                      selected: tab,
+                      onSelect: (value) => _navigate(context, {
+                        'tab': value,
+                        'category': null,
+                        'status': null,
+                        'source': null,
+                      }),
                     ),
+                    const SizedBox(height: 6),
                     RangeControls(
                       range: period,
                       showCurrency: false,
+                      showDate: false,
                       onChange: (value) => _navigate(context, {
                         'from': value.from,
                         'to': value.to,
                       }),
-                    ),
-                    Wrap(
-                      spacing: 14,
-                      runSpacing: 4,
-                      children: [
+                      additional: [
                         if (notices)
                           _Filter(
                             'Estado',
@@ -122,6 +141,7 @@ class MovementsScreen extends ConsumerWidget {
                             (value) => _navigate(context, {
                               'currency': value ?? 'all',
                             }),
+                            emptyLabel: 'Todas',
                           ),
                           if (tab != 'income')
                             _Filter(
@@ -140,96 +160,92 @@ class MovementsScreen extends ConsumerWidget {
                         ],
                       ],
                     ),
-                    if (!notices)
-                      FilledButton.icon(
-                        icon: const Icon(Icons.add),
-                        label: const Text('Registrar movimiento'),
-                        onPressed: () => context.push(
-                          financePath('/history/new', {
-                            'currency': currency ?? 'COP',
-                            'direction': ?movementFilter.direction,
-                          }),
-                        ),
+                    if (report != null) ...[
+                      const SizedBox(height: 4),
+                      _PeriodTotal(
+                        report: report,
+                        currency: period.currency,
+                        income: tab == 'income',
                       ),
-                    const SizedBox(height: 12),
+                    ],
                   ],
                 ),
               ),
             ),
             if (notices)
-              ref
+              ...ref
                   .watch(noticeList)
                   .when(
-                    loading: _progress,
-                    error: (error, _) =>
-                        _retry(error, () => ref.invalidate(noticeList)),
-                    data: (page) => _rows(
-                      context,
-                      page.items.length,
-                      page.hasMore,
-                      'No hay avisos que coincidan con los filtros.',
-                      () => ref.read(noticeList.notifier).loadMore(),
-                      (index) {
-                        final notice = page.items[index];
-                        return Card(
-                          child: ListTile(
-                            leading: const Icon(Icons.mail_outline),
-                            title: Text(notice.providerLabel),
-                            subtitle: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(syncLabel(notice.receivedAt)),
-                                StatusBadge(notice.status),
-                              ],
+                    loading: () => [_progress('Cargando avisos')],
+                    error: (error, _) => [
+                      _retry(error, () => ref.invalidate(noticeList)),
+                    ],
+                    data: (page) => [
+                      _noticeHeader(context, page),
+                      _rows(
+                        context,
+                        page.items.length,
+                        page.hasMore,
+                        'No hay avisos que coincidan con los filtros.',
+                        () => ref.read(noticeList.notifier).loadMore(),
+                        (index) {
+                          final notice = page.items[index];
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 9),
+                            child: _NoticeTile(
+                              notice,
+                              onTap: () => context.push(
+                                financePath('/history/${notice.id}', {
+                                  ...query,
+                                  'tab': 'notices',
+                                }),
+                              ),
                             ),
-                            trailing: const Icon(Icons.chevron_right),
-                            onTap: () => context.push(
-                              financePath('/history/${notice.id}', {
-                                ...query,
-                                'tab': 'notices',
-                              }),
-                            ),
+                          );
+                        },
+                      ),
+                      const SliverPadding(
+                        padding: EdgeInsets.fromLTRB(20, 4, 20, 20),
+                        sliver: SliverToBoxAdapter(
+                          child: AppNotice(
+                            icon: Icons.info_outline,
+                            title: 'Importes por confirmar',
+                            description:
+                                'Los avisos de esta pestaña se agregan a tus totales cuando se registran.',
                           ),
-                        );
-                      },
-                    ),
+                        ),
+                      ),
+                    ],
                   )
             else
               ref
                   .watch(reports)
                   .when(
-                    loading: _progress,
+                    loading: () => _progress('Cargando movimientos'),
                     error: (error, _) =>
                         _retry(error, () => ref.invalidate(reports)),
-                    data: (page) => _rows(
-                      context,
-                      page.items.length,
-                      page.hasMore,
-                      'No hay movimientos que coincidan con los filtros.',
-                      () => ref.read(reports.notifier).more(),
-                      (index) {
-                        final item = page.items[index];
-                        return Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            if (index == 0 ||
-                                page.items[index - 1].date != item.date)
-                              Padding(
-                                padding: const EdgeInsets.fromLTRB(4, 10, 4, 4),
-                                child: Text(
-                                  dayLabel(item.date),
-                                  style: Theme.of(context).textTheme.labelLarge,
-                                ),
-                              ),
-                            MovementTile(
-                              item,
-                              onTap: () =>
-                                  context.push('/history/movement/${item.id}'),
-                            ),
-                          ],
-                        );
-                      },
-                    ),
+                    data: (page) {
+                      final groups = <List<Movement>>[];
+                      for (final item in page.items) {
+                        if (groups.isEmpty ||
+                            groups.last.first.date != item.date) {
+                          groups.add([]);
+                        }
+                        groups.last.add(item);
+                      }
+                      return _rows(
+                        context,
+                        groups.length,
+                        page.hasMore,
+                        'No hay movimientos que coincidan con los filtros.',
+                        () => ref.read(reports.notifier).more(),
+                        (index) => _movementGroup(
+                          context,
+                          groups[index],
+                          showCurrency: currency == null,
+                        ),
+                      );
+                    },
                   ),
           ],
         ),
@@ -237,8 +253,84 @@ class MovementsScreen extends ConsumerWidget {
     );
   }
 
-  Widget _progress() => const SliverToBoxAdapter(
-    child: LinearProgressIndicator(semanticsLabel: 'Cargando movimientos'),
+  Widget _noticeHeader(BuildContext context, HistoryPage page) {
+    const labels = {
+      'pending': 'pendiente',
+      'processing': 'en proceso',
+      'error': 'con error',
+    };
+    final counts = [
+      for (final entry in labels.entries)
+        if (page.items.where((item) => item.status == entry.key).length
+            case final count when count > 0)
+          '$count ${entry.value}',
+    ];
+    return SliverPadding(
+      padding: const EdgeInsets.fromLTRB(20, 2, 20, 12),
+      sliver: SliverToBoxAdapter(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SectionHeading('Avisos por revisar'),
+            if (page.items.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(
+                page.hasMore
+                    ? '${page.items.length} avisos mostrados'
+                    : counts.join(' · '),
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _movementGroup(
+    BuildContext context,
+    List<Movement> group, {
+    required bool showCurrency,
+  }) => Padding(
+    padding: const EdgeInsets.only(bottom: 12),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Text(
+            shortDay(group.first.date),
+            style: Theme.of(context).textTheme.labelMedium,
+          ),
+        ),
+        Card(
+          child: Column(
+            children: [
+              for (final (index, item) in group.indexed) ...[
+                if (index > 0)
+                  const Divider(height: 1, indent: 10, endIndent: 10),
+                MovementRow(
+                  item,
+                  showCurrency: showCurrency,
+                  onTap: () => context.push('/history/movement/${item.id}'),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _progress(String label) => SliverPadding(
+    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+    sliver: SliverToBoxAdapter(
+      child: LinearProgressIndicator(
+        semanticsLabel: label,
+        borderRadius: BorderRadius.circular(5),
+        minHeight: 5,
+      ),
+    ),
   );
 
   Widget _retry(Object error, VoidCallback retry) =>
@@ -251,56 +343,187 @@ class MovementsScreen extends ConsumerWidget {
     String empty,
     Future<void> Function() next,
     Widget Function(int) row,
-  ) {
-    if (count == 0) {
-      return SliverToBoxAdapter(
-        child: Padding(padding: const EdgeInsets.all(20), child: Text(empty)),
-      );
-    }
-    return SliverPadding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
-      sliver: SliverList.builder(
-        itemCount: count + (more ? 1 : 0),
-        itemBuilder: (context, index) => index < count
-            ? row(index)
-            : TextButton(
-                onPressed: () async {
-                  try {
-                    await next();
-                  } catch (error) {
-                    if (context.mounted) {
-                      showMessage(context, failureMessage(error));
-                    }
-                  }
-                },
-                child: const Text('Cargar más'),
-              ),
-      ),
-    );
-  }
+  ) => SliverPadding(
+    padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+    sliver: count == 0
+        ? SliverToBoxAdapter(
+            child: AppNotice(icon: Icons.inbox_outlined, title: empty),
+          )
+        : SliverList.builder(
+            itemCount: count + (more ? 1 : 0),
+            itemBuilder: (context, index) => index < count
+                ? row(index)
+                : TextButton(
+                    onPressed: () async {
+                      try {
+                        await next();
+                      } catch (error) {
+                        if (context.mounted) {
+                          showMessage(context, failureMessage(error));
+                        }
+                      }
+                    },
+                    child: const Text('Cargar más'),
+                  ),
+          ),
+  );
 }
 
 class _Filter extends StatelessWidget {
-  const _Filter(this.label, this.value, this.options, this.onChange);
+  const _Filter(
+    this.label,
+    this.value,
+    this.options,
+    this.onChange, {
+    this.emptyLabel = 'Todos',
+  });
   final String label;
   final String? value;
   final Map<String, String> options;
+  final String emptyLabel;
   final ValueChanged<String?> onChange;
 
   @override
   Widget build(BuildContext context) => PopupMenuButton<String>(
     tooltip: label,
-    child: Chip(
-      label: Text(options[value] ?? label),
-      avatar: const Icon(Icons.expand_more, size: 17),
+    initialValue: value ?? '',
+    child: FilterLabel(
+      options[value] ?? label,
+      highlighted: value != null && label != 'Moneda',
     ),
     onSelected: (value) => onChange(value.isEmpty ? null : value),
     itemBuilder: (_) => [
-      const PopupMenuItem(value: '', child: Text('Todos')),
+      PopupMenuItem(value: '', child: Text(emptyLabel)),
       for (final entry in options.entries)
         PopupMenuItem(value: entry.key, child: Text(entry.value)),
     ],
   );
+}
+
+class _PeriodTotal extends StatelessWidget {
+  const _PeriodTotal({
+    required this.report,
+    required this.currency,
+    required this.income,
+  });
+  final Analytics report;
+  final String currency;
+  final bool income;
+
+  @override
+  Widget build(BuildContext context) {
+    final tone = income ? AppTone.income : AppTone.expense;
+    final amount = income ? report.income : report.expense;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: tone.tint,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Row(
+        children: [
+          IconTile(
+            income ? Icons.south_west_rounded : Icons.north_east_rounded,
+            tone: tone,
+            size: 36,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  income ? 'Ingresos del periodo' : 'Gastos del periodo',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.labelMedium?.copyWith(color: tone.ink),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '$currency ${displayMoney(amount, currency, symbol: false)}',
+                  semanticsLabel: money(amount, currency),
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    color: tone.ink,
+                    fontFeatures: tabularFigures,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _NoticeTile extends StatelessWidget {
+  const _NoticeTile(this.notice, {required this.onTap});
+  final Notice notice;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final title = Text(
+      notice.provider == 'other'
+          ? notice.providerLabel
+          : 'Aviso de ${notice.providerLabel}',
+      style: text.titleMedium,
+    );
+    final badge = StatusBadge(notice.status);
+    final summary =
+        '${receivedDay(notice.receivedAt)} · ${noticePreview(notice)}';
+    return Card(
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Row(
+            children: [
+              IconTile(
+                noticeIcon(notice.status),
+                tone: noticeTone(notice.status),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final stacked =
+                        constraints.maxWidth < 188 ||
+                        MediaQuery.textScalerOf(context).scale(14) > 18;
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (stacked) ...[
+                          title,
+                          const SizedBox(height: 4),
+                          badge,
+                        ] else
+                          TrailingRow(leading: title, trailing: badge),
+                        const SizedBox(height: 3),
+                        Text(
+                          summary,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: text.bodySmall,
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(width: 3),
+              const Icon(
+                Icons.chevron_right_rounded,
+                size: 17,
+                color: AppColors.muted,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class MovementScreen extends ConsumerWidget {
@@ -378,82 +601,184 @@ class _MovementDetailState extends ConsumerState<_MovementDetail> {
   @override
   Widget build(BuildContext context) {
     final item = widget.item;
-    final color = item.income ? incomeColor : expenseColor;
+    final tone = item.income ? AppTone.income : AppTone.expense;
+    final text = Theme.of(context).textTheme;
     return Scaffold(
-      appBar: AppBar(title: const Text('Detalle del movimiento')),
+      appBar: appBackBar('Movimientos', () => context.pop()),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: screenPadding,
         children: [
-          Card(
-            color: item.income ? incomeSurface : expenseSurface,
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    item.kind,
-                    style: TextStyle(color: color, fontWeight: FontWeight.bold),
-                  ),
-                  Text(
-                    item.signedAmount,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.headlineSmall?.copyWith(color: color),
-                  ),
-                  Text(item.title),
-                ],
-              ),
+          const PageHeading('Detalle del movimiento', eyebrow: 'HISTORIAL'),
+          const SizedBox(height: 14),
+          Container(
+            decoration: BoxDecoration(
+              color: tone.tint,
+              borderRadius: BorderRadius.circular(18),
             ),
-          ),
-          for (final (label, value) in [
-            ('Fecha', dayLabel(item.date)),
-            ('Categoría', categories[item.category] ?? item.category),
-            ('Medio de pago', item.method ?? 'Sin especificar'),
-            ('Origen', movementSources[item.source] ?? item.source),
-          ])
-            ListTile(title: Text(label), subtitle: Text(value)),
-          if (item.manual)
-            Wrap(
-              spacing: 12,
+            padding: const EdgeInsets.all(15),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                OutlinedButton.icon(
-                  onPressed: _busy
-                      ? null
-                      : () => context.push('/history/movement/${item.id}/edit'),
-                  icon: const Icon(Icons.edit_outlined),
-                  label: const Text('Editar'),
+                SeriesCaption(
+                  item.kind,
+                  item.income
+                      ? Icons.south_west_rounded
+                      : Icons.north_east_rounded,
+                  tone,
                 ),
-                TextButton.icon(
-                  onPressed: _busy ? null : () => _remove(item),
-                  icon: const Icon(Icons.delete_outline),
-                  label: const Text('Eliminar'),
+                const SizedBox(height: 6),
+                Text(
+                  item.title,
+                  style: text.titleLarge?.copyWith(color: tone.ink),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  item.signedAmount,
+                  style: text.headlineSmall?.copyWith(
+                    color: tone.ink,
+                    fontFeatures: tabularFigures,
+                  ),
                 ),
               ],
             ),
-          if (item.matches.isNotEmpty) ...[
-            const SizedBox(height: 14),
-            Text(
-              'Posible duplicado',
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            const Text(
-              'Compara los registros. Si corresponden al mismo movimiento, puedes eliminar el manual.',
-            ),
-            MovementTile(item),
-            for (final match in item.matches) ...[
-              MovementTile(
-                match,
-                onTap: () => context.push('/history/movement/${match.id}'),
+          ),
+          const SizedBox(height: 10),
+          DetailFields([
+            ('Fecha', shortDay(item.date)),
+            ('Categoría', categories[item.category] ?? item.category),
+            ('Medio de pago', item.method ?? 'Sin especificar'),
+            ('Origen', movementSources[item.source] ?? item.source),
+          ]),
+          if (item.manual) ...[
+            const SizedBox(height: 12),
+            FormPair(
+              first: OutlinedButton.icon(
+                onPressed: _busy
+                    ? null
+                    : () => context.push('/history/movement/${item.id}/edit'),
+                icon: const Icon(Icons.edit_outlined),
+                label: const Text('Editar'),
               ),
-              if (match.manual)
-                TextButton(
-                  onPressed: _busy ? null : () => _remove(match),
-                  child: const Text('Eliminar manual'),
-                ),
-            ],
+              second: FilledButton.icon(
+                onPressed: _busy ? null : () => _remove(item),
+                style: dangerButtonStyle(),
+                icon: const Icon(Icons.delete_outline),
+                label: const Text('Eliminar'),
+              ),
+            ),
+          ],
+          if (item.matches.isNotEmpty) ...[
+            const SizedBox(height: 18),
+            const AppNotice(
+              icon: Icons.copy_all_outlined,
+              title: 'Posible duplicado',
+              description:
+                  'Compara los registros. Si corresponden al mismo movimiento, puedes eliminar el manual.',
+            ),
+            const SizedBox(height: 9),
+            Card(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _MatchRow(item),
+                  for (final match in item.matches) ...[
+                    const Divider(height: 1, indent: 12, endIndent: 12),
+                    _MatchRow(
+                      match,
+                      onTap: () =>
+                          context.push('/history/movement/${match.id}'),
+                    ),
+                    if (match.manual)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+                        child: FilledButton(
+                          onPressed: _busy ? null : () => _remove(match),
+                          style: dangerButtonStyle(),
+                          child: const Text('Eliminar manual'),
+                        ),
+                      ),
+                  ],
+                ],
+              ),
+            ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+class SeriesCaption extends StatelessWidget {
+  const SeriesCaption(this.label, this.icon, this.tone, {super.key});
+  final String label;
+  final IconData icon;
+  final AppTone tone;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      Icon(icon, color: tone.ink, size: 17),
+      const SizedBox(width: 6),
+      Expanded(
+        child: Text(
+          label,
+          style: Theme.of(
+            context,
+          ).textTheme.labelMedium?.copyWith(color: tone.ink),
+        ),
+      ),
+    ],
+  );
+}
+
+class _MatchRow extends StatelessWidget {
+  const _MatchRow(this.item, {this.onTap});
+  final Movement item;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final tone = item.income ? AppTone.income : AppTone.expense;
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                AppBadge(
+                  movementSources[item.source] ?? item.source,
+                  tone: item.manual ? AppTone.info : AppTone.neutral,
+                ),
+                Text(item.title, style: text.titleMedium),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(shortDay(item.date), style: text.bodySmall),
+                ),
+                Flexible(
+                  child: Text(
+                    item.signedAmount,
+                    textAlign: TextAlign.end,
+                    style: text.labelMedium?.copyWith(
+                      color: tone.ink,
+                      fontFeatures: tabularFigures,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -614,167 +939,229 @@ class _MovementFormState extends ConsumerState<MovementForm> {
     };
   }
 
+  Future<void> _pickDate() async {
+    final today = DateUtils.dateOnly(bogotaNow());
+    final first = DateTime(1900);
+    final selected = DateTime.tryParse(_date ?? '') ?? today;
+    final value = await showDatePicker(
+      context: context,
+      initialDate: selected.isBefore(first) || selected.isAfter(today)
+          ? today
+          : selected,
+      firstDate: first,
+      lastDate: today,
+      currentDate: today,
+    );
+    if (mounted && value != null) setState(() => _date = isoDay(value));
+  }
+
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(
-      title: Text(
-        widget.notice != null
-            ? 'Confirmar movimiento'
-            : widget.existing == null
-            ? 'Registrar movimiento'
-            : 'Editar movimiento',
+  Widget build(BuildContext context) {
+    final notice = widget.notice != null;
+    final editing = widget.existing != null;
+    final method = LabeledField(
+      'Medio de pago',
+      child: TextFormField(
+        controller: _method,
+        enabled: !_busy,
+        maxLength: 60,
+        textInputAction: TextInputAction.next,
+        decoration: const InputDecoration(
+          hintText: 'Opcional',
+          counterText: '',
+        ),
       ),
-    ),
-    body: Form(
-      key: _form,
-      child: ListView(
-        padding: const EdgeInsets.all(20),
-        children: [
-          if (widget.notice != null) ...[
-            const Text(
-              'Revisa el correo original y completa los datos del movimiento.',
-            ),
-            const SizedBox(height: 12),
-          ],
-          const Text('Tipo de movimiento'),
-          Wrap(
-            spacing: 8,
+    );
+    return Scaffold(
+      appBar: appBackBar(
+        notice ? 'Detalle del aviso' : 'Movimientos',
+        () => context.pop(),
+      ),
+      body: FormLayout(
+        child: Form(
+          key: _form,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              for (final (key, label) in [
-                ('income', 'Ingreso'),
-                ('expense', 'Gasto'),
-              ])
-                ChoiceChip(
-                  label: Text(label),
-                  selected: _direction == key,
-                  onSelected: _busy
+              PageHeading(
+                notice
+                    ? 'Confirmar movimiento'
+                    : editing
+                    ? 'Editar movimiento'
+                    : 'Registrar movimiento',
+                eyebrow: notice ? 'REVISIÓN DE AVISO' : 'CAPTURA MANUAL',
+                description: notice
+                    ? 'Revisa el correo original y completa los datos del movimiento.'
+                    : editing
+                    ? 'Actualiza los datos de este registro.'
+                    : 'Agrega un ingreso o un gasto a tu historial.',
+              ),
+              const SizedBox(height: 12),
+              LabeledField(
+                'Tipo de movimiento',
+                child: SegmentTabs<String>(
+                  items: const {'income': 'Ingreso', 'expense': 'Gasto'},
+                  selected: _direction,
+                  onSelect: _busy
                       ? null
-                      : (_) => setState(() {
-                          _direction = key;
+                      : (value) => setState(() {
+                          _direction = value;
                           _error = null;
                         }),
                 ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          TextFormField(
-            key: const ValueKey('movement-amount'),
-            controller: _amount,
-            enabled: !_busy,
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            decoration: const InputDecoration(
-              labelText: 'Monto',
-              hintText: '42.000,00',
-            ),
-            validator: (value) => parseMinor(value ?? '') == null
-                ? 'Ingresa un monto positivo válido.'
-                : null,
-          ),
-          const SizedBox(height: 12),
-          DropdownButtonFormField<String>(
-            initialValue: _currency,
-            decoration: const InputDecoration(labelText: 'Moneda'),
-            items: [
-              for (final code in currencies.keys)
-                DropdownMenuItem(value: code, child: Text(code)),
-            ],
-            onChanged: _busy
-                ? null
-                : (value) => setState(() => _currency = value!),
-            validator: (value) =>
-                value == null ? 'Selecciona la moneda.' : null,
-          ),
-          const SizedBox(height: 12),
-          OutlinedButton.icon(
-            icon: const Icon(Icons.calendar_month),
-            label: Text(
-              _date == null
-                  ? 'Seleccionar fecha'
-                  : 'Fecha · ${dayLabel(_date!)}',
-            ),
-            onPressed: _busy
-                ? null
-                : () async {
-                    final today = DateUtils.dateOnly(bogotaNow());
-                    final first = DateTime(1900);
-                    final selected = DateTime.tryParse(_date ?? '') ?? today;
-                    final value = await showDatePicker(
-                      context: context,
-                      initialDate:
-                          selected.isBefore(first) || selected.isAfter(today)
-                          ? today
-                          : selected,
-                      firstDate: first,
-                      lastDate: today,
-                      currentDate: today,
-                    );
-                    if (mounted && value != null) {
-                      setState(() => _date = isoDay(value));
-                    }
-                  },
-          ),
-          if (_direction == 'expense') ...[
-            const SizedBox(height: 12),
-            DropdownButtonFormField<String>(
-              initialValue: _category,
-              decoration: const InputDecoration(labelText: 'Categoría'),
-              items: [
-                for (final entry in categories.entries)
-                  if (entry.key != 'ingresos')
-                    DropdownMenuItem(
-                      value: entry.key,
-                      child: Text(entry.value),
+              ),
+              const SizedBox(height: 16),
+              FormPair(
+                firstFlex: 2,
+                first: LabeledField(
+                  'Monto',
+                  child: TextFormField(
+                    key: const ValueKey('movement-amount'),
+                    controller: _amount,
+                    enabled: !_busy,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
                     ),
+                    decoration: const InputDecoration(hintText: '42.000,00'),
+                    validator: (value) => parseMinor(value ?? '') == null
+                        ? 'Ingresa un monto positivo válido.'
+                        : null,
+                  ),
+                ),
+                second: LabeledField(
+                  'Moneda',
+                  child: DropdownButtonFormField<String>(
+                    key: const ValueKey('movement-currency'),
+                    initialValue: _currency,
+                    decoration: const InputDecoration(),
+                    isExpanded: true,
+                    icon: const Icon(
+                      Icons.keyboard_arrow_down_rounded,
+                      size: 18,
+                      color: AppColors.muted,
+                    ),
+                    hint: const Text('Elige'),
+                    items: [
+                      for (final code in currencies.keys)
+                        DropdownMenuItem(value: code, child: Text(code)),
+                    ],
+                    onChanged: _busy
+                        ? null
+                        : (value) => setState(() => _currency = value!),
+                    validator: (value) =>
+                        value == null ? 'Selecciona la moneda.' : null,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              LabeledField(
+                'Fecha',
+                child: OutlinedButton(
+                  onPressed: _busy ? null : _pickDate,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.ink,
+                    side: const BorderSide(color: AppColors.border),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 13,
+                      vertical: 10,
+                    ),
+                    textStyle: Theme.of(context).textTheme.bodyLarge,
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          _date == null
+                              ? 'Seleccionar fecha'
+                              : shortDay(_date!),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      const Icon(
+                        Icons.calendar_month_outlined,
+                        color: AppColors.muted,
+                        size: 18,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              if (_direction == 'expense')
+                FormPair(
+                  first: LabeledField(
+                    'Categoría',
+                    child: DropdownButtonFormField<String>(
+                      key: const ValueKey('movement-category'),
+                      initialValue: _category,
+                      decoration: const InputDecoration(),
+                      isExpanded: true,
+                      icon: const Icon(
+                        Icons.keyboard_arrow_down_rounded,
+                        size: 18,
+                        color: AppColors.muted,
+                      ),
+                      hint: const Text('Selecciona'),
+                      items: [
+                        for (final entry in categories.entries)
+                          if (entry.key != 'ingresos')
+                            DropdownMenuItem(
+                              value: entry.key,
+                              child: Text(entry.value),
+                            ),
+                      ],
+                      onChanged: _busy
+                          ? null
+                          : (value) => setState(() => _category = value),
+                      validator: (value) =>
+                          value == null ? 'Selecciona una categoría.' : null,
+                    ),
+                  ),
+                  second: method,
+                )
+              else
+                method,
+              const SizedBox(height: 12),
+              LabeledField(
+                'Descripción opcional',
+                child: TextFormField(
+                  key: const ValueKey('movement-description'),
+                  controller: _description,
+                  enabled: !_busy,
+                  maxLength: 200,
+                  decoration: const InputDecoration(
+                    hintText: 'Escribe una descripción',
+                    counterText: '',
+                  ),
+                ),
+              ),
+              const SizedBox(height: 18),
+              AppNotice(
+                icon: notice ? Icons.mail_outline : Icons.edit_note_rounded,
+                title: notice ? 'Origen correo' : 'Origen manual',
+                description:
+                    'Tu movimiento aparecerá en el historial y en los totales del periodo.',
+              ),
+              if (_error case final error?) ...[
+                const SizedBox(height: 10),
+                AppNotice(
+                  icon: Icons.error_outline,
+                  title: error,
+                  tone: AppTone.danger,
+                ),
               ],
-              onChanged: _busy
-                  ? null
-                  : (value) => setState(() => _category = value),
-              validator: (value) =>
-                  value == null ? 'Selecciona una categoría.' : null,
-            ),
-          ],
-          const SizedBox(height: 12),
-          TextFormField(
-            controller: _method,
-            enabled: !_busy,
-            maxLength: 60,
-            decoration: const InputDecoration(
-              labelText: 'Medio de pago (opcional)',
-              counterText: '',
-            ),
+              const SizedBox(height: 18),
+              FilledButton.icon(
+                onPressed: _busy ? null : _save,
+                icon: const Icon(Icons.check_rounded),
+                label: Text(_saveLabel),
+              ),
+            ],
           ),
-          const SizedBox(height: 12),
-          TextFormField(
-            key: const ValueKey('movement-description'),
-            controller: _description,
-            enabled: !_busy,
-            maxLength: 200,
-            decoration: const InputDecoration(
-              labelText: 'Descripción (opcional)',
-              counterText: '',
-            ),
-          ),
-          const SizedBox(height: 12),
-          Text(
-            widget.notice != null
-                ? 'Origen correo · Aparecerá en el historial y en los totales.'
-                : 'Origen manual · Aparecerá en el historial y en los totales.',
-          ),
-          if (_error case final error?)
-            Text(
-              error,
-              style: TextStyle(color: Theme.of(context).colorScheme.error),
-            ),
-          const SizedBox(height: 14),
-          FilledButton.icon(
-            onPressed: _busy ? null : _save,
-            icon: const Icon(Icons.check),
-            label: Text(_saveLabel),
-          ),
-        ],
+        ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 BigInt? parseMinor(String text) {

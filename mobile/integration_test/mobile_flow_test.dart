@@ -22,7 +22,7 @@ void main() {
       addTearDown(() => storage.delete(key: 'mailgasto_session@$_origin'));
       app.main();
       await _settle(tester);
-      expect(find.text('Iniciar sesión'), findsOneWidget);
+      expect(_loginButton, findsOneWidget);
       await _tap(tester, 'Continuar con Google');
       final googleUnavailable = find.textContaining(
         'todavía no está disponible en este servidor',
@@ -36,9 +36,12 @@ void main() {
       await _enter(tester, 'name', 'Usuario ficticio');
       await _enter(tester, 'email', newEmail);
       await _enter(tester, 'password', _password);
-      await _tap(tester, 'Registrarme');
-      await _waitFor(tester, find.textContaining('Revisa tu correo'));
-      expect(find.textContaining('Revisa tu correo'), findsOneWidget);
+      await _tapFinder(
+        tester,
+        find.widgetWithText(FilledButton, 'Crear cuenta'),
+      );
+      await _waitFor(tester, find.text('Verifica tu correo'));
+      expect(find.text('Verifica tu correo'), findsOneWidget);
       await _tap(tester, 'Volver a iniciar sesión');
 
       await _login(tester, newEmail);
@@ -51,9 +54,9 @@ void main() {
         findsOneWidget,
       );
       await _verifyEmail(newEmail);
-      await _tap(tester, 'Iniciar sesión');
-      await _waitFor(tester, find.text('COP 0,00'));
-      expect(find.text('COP 0,00'), findsWidgets);
+      await _tapFinder(tester, _loginButton);
+      await _waitFor(tester, find.text(r'$0'));
+      expect(find.text(r'$0'), findsWidgets);
       expect(find.text('Vincular Gmail'), findsOneWidget);
 
       await _tap(tester, 'Registrar movimiento');
@@ -66,29 +69,34 @@ void main() {
       await _tap(tester, 'Registrar movimiento');
       await _tap(tester, 'Gasto');
       await _enter(tester, 'movement-amount', '486.000');
-      await _tap(tester, 'Categoría');
+      await _tapFinder(tester, find.byKey(const ValueKey('movement-category')));
       await _tap(tester, 'Alimentación');
       await _enter(tester, 'movement-description', 'Gasto QA');
       await _tap(tester, 'Guardar gasto');
       await _waitFor(tester, find.text('Gasto QA'));
       expect(find.text('Gasto QA'), findsOneWidget);
 
-      await _tap(tester, 'Análisis');
+      await _tab(tester, 'Análisis');
       await _waitFor(tester, find.text('Ingresos vs. gastos'));
       await _tap(tester, 'Ver tabla');
-      await _show(tester, find.text('Balance del periodo · COP 1.164.000,00'));
-      expect(
-        find.text('Balance del periodo · COP 1.164.000,00'),
-        findsOneWidget,
-      );
+      await _show(tester, find.text(r'+ $1.164.000'));
+      expect(find.text(r'+ $1.164.000'), findsOneWidget);
 
-      await _tap(tester, 'Asistente');
+      await _tap(tester, 'Volver a la gráfica');
+      await _tap(tester, 'Ver desgloses');
+      expect(find.text('Ingresos por origen de registro'), findsOneWidget);
+      await _tap(tester, 'Alimentación');
+      await _waitFor(tester, find.text('Gasto QA'));
+      expect(find.text('Gasto QA'), findsOneWidget);
+
+      await _tab(tester, 'Asistente');
       await _tap(tester, 'Compara mis ingresos y gastos');
       await tester.tap(find.byTooltip('Enviar'));
       await _settle(tester);
-      expect(find.textContaining('balance 1.164.000,00'), findsOneWidget);
+      await _waitFor(tester, find.text(r'+ $1.164.000'));
+      expect(find.text(r'+ $1.164.000'), findsOneWidget);
 
-      await _tap(tester, 'Movimientos');
+      await _tab(tester, 'Movimientos');
       await _tap(tester, 'Ingresos');
       await _tap(tester, 'Ingreso QA');
       await _tap(tester, 'Editar');
@@ -113,7 +121,7 @@ void main() {
       );
       expect(find.text('Gasto QA'), findsNothing);
 
-      await _tap(tester, 'Perfil');
+      await _tab(tester, 'Perfil');
       await _tap(tester, 'Editar nombre');
       await _enter(tester, 'profile-name', 'Nombre actualizado');
       await _tap(tester, 'Guardar');
@@ -131,7 +139,7 @@ void main() {
       await _enter(tester, 'recovery-email', newEmail);
       await _tap(tester, 'Enviar enlace');
       final reset = await _mailToken(newEmail, 'reset');
-      final recovery = tester.element(find.text('Recuperar contraseña'));
+      final recovery = tester.element(find.text('Solicitud recibida'));
       GoRouter.of(recovery).go('/reset', extra: reset);
       await _settle(tester);
       await _enter(tester, 'new-password', _password);
@@ -140,7 +148,7 @@ void main() {
       await _login(tester, newEmail);
       await _waitFor(tester, find.text('Hola, Nombre'));
       expect(find.text('Hola, Nombre'), findsOneWidget);
-      await _tap(tester, 'Perfil');
+      await _tab(tester, 'Perfil');
       await _tap(tester, 'Seguridad y privacidad');
       await _tap(tester, 'Solicitar eliminación');
       await _tap(tester, 'Enviar confirmación');
@@ -151,27 +159,27 @@ void main() {
       GoRouter.of(security).go('/settings/security/delete', extra: deletion);
       await _settle(tester);
       await _tap(tester, 'Eliminar definitivamente');
-      await _waitFor(tester, find.text('Iniciar sesión'));
+      await _waitFor(tester, _loginButton);
 
       await _login(tester, _email);
-      await _waitFor(tester, find.text('COP 25.000,00'));
-      expect(find.text('COP 25.000,00'), findsWidgets);
+      await _waitFor(tester, find.text(r'$25.000'));
+      expect(find.text(r'$25.000'), findsWidgets);
       await tester.pumpWidget(const SizedBox.shrink());
       await _settle(tester);
       app.main();
       await _settle(tester);
-      expect(find.text('COP 25.000,00'), findsWidgets);
+      expect(find.text(r'$25.000'), findsWidgets);
 
       await tester.tap(find.byKey(const ValueKey('home-period')));
       await _settle(tester);
       await _tap(tester, 'Mes anterior');
-      expect(find.text('COP 5.000,00'), findsWidgets);
+      expect(find.text(r'$5.000'), findsWidgets);
       await tester.tap(find.byKey(const ValueKey('home-period')));
       await _settle(tester);
       await _tap(tester, 'Este mes');
-      await _tap(tester, 'Ver avisos pendientes');
-      expect(find.text('COP 25.000,00'), findsNothing);
-      await _tap(tester, 'Nequi');
+      await _tap(tester, '2 avisos pendientes');
+      expect(find.text(r'$25.000'), findsNothing);
+      await _tap(tester, 'Aviso de Nequi');
       expect(find.text('Datos por confirmar: monto.'), findsOneWidget);
       await tester.tap(find.byType(BackButton).hitTestable());
       await _settle(tester);
@@ -179,9 +187,9 @@ void main() {
       await tester.tap(find.byTooltip('Moneda').hitTestable());
       await _settle(tester);
       await _tap(tester, 'USD');
-      expect(find.text('− USD 12,50'), findsOneWidget);
+      expect(find.text(r'− $12,50'), findsOneWidget);
 
-      await _tap(tester, 'Asistente');
+      await _tab(tester, 'Asistente');
       await _tap(tester, '¿Cuánto gasté en alimentación este mes?');
       await tester.tap(find.byTooltip('Enviar'));
       await _settle(tester);
@@ -198,9 +206,9 @@ void main() {
         findsOneWidget,
       );
 
-      await _tap(tester, 'Perfil');
+      await _tab(tester, 'Perfil');
       await _tap(tester, 'Buzones');
-      expect(find.textContaining('Última sincronización:'), findsOneWidget);
+      expect(find.text('Última sincronización'), findsOneWidget);
       await _tap(tester, 'Vincular Gmail');
       expect(
         find.descendant(
@@ -220,7 +228,7 @@ void main() {
       await tester.tap(find.byType(BackButton).hitTestable());
       await _settle(tester);
       await _tap(tester, 'Cerrar sesión');
-      expect(find.text('Iniciar sesión'), findsOneWidget);
+      expect(_loginButton, findsOneWidget);
     },
     skip:
         _origin != 'http://localhost:3105' ||
@@ -236,13 +244,13 @@ void main() {
       app.main();
       await _settle(tester);
       await _login(tester, _email);
-      await _waitFor(tester, find.text('COP 25.000,00'));
-      expect(find.text('COP 25.000,00'), findsWidgets);
-      await _waitFor(tester, find.text('Ver avisos pendientes'));
-      await _tap(tester, 'Ver avisos pendientes');
+      await _waitFor(tester, find.text(r'$25.000'));
+      expect(find.text(r'$25.000'), findsWidgets);
+      await _waitFor(tester, find.text('2 avisos pendientes'));
+      await _tap(tester, '2 avisos pendientes');
 
-      await _waitFor(tester, find.text('Nequi'));
-      await _tap(tester, 'Nequi');
+      await _waitFor(tester, find.text('Aviso de Nequi'));
+      await _tap(tester, 'Aviso de Nequi');
       await _tap(tester, 'Descartar aviso');
       await _tap(tester, 'Cancelar');
       expect(find.text('Detalle del aviso'), findsOneWidget);
@@ -255,7 +263,7 @@ void main() {
         const Offset(0, 350),
       );
       await _settle(tester);
-      expect(find.text('Nequi'), findsNothing);
+      expect(find.text('Aviso de Nequi'), findsNothing);
 
       await _tap(tester, 'Otro remitente');
       expect(find.text('Monto por confirmar'), findsOneWidget);
@@ -267,12 +275,12 @@ void main() {
       expect(amount.controller!.text, isEmpty);
       await _tap(tester, 'Gasto');
       await _enter(tester, 'movement-amount', '3.500');
-      await _tap(tester, 'Moneda');
+      await _tapFinder(tester, find.byKey(const ValueKey('movement-currency')));
       await _tap(tester, 'COP');
       await _tap(tester, 'Seleccionar fecha');
       final picker = tester.element(find.byType(DatePickerDialog));
       await _tap(tester, MaterialLocalizations.of(picker).okButtonLabel);
-      await _tap(tester, 'Categoría');
+      await _tapFinder(tester, find.byKey(const ValueKey('movement-category')));
       await _tap(tester, 'Compras');
       await _enter(tester, 'movement-description', 'Compra confirmada QA');
       await _tap(tester, 'Confirmar y registrar');
@@ -284,9 +292,9 @@ void main() {
       final empty = find.text('No hay avisos que coincidan con los filtros.');
       await _waitFor(tester, empty);
       expect(empty, findsOneWidget);
-      await _tap(tester, 'Inicio');
-      await _waitFor(tester, find.text('COP 28.500,00'));
-      expect(find.text('COP 28.500,00'), findsWidgets);
+      await _tab(tester, 'Inicio');
+      await _waitFor(tester, find.text(r'$28.500'));
+      expect(find.text(r'$28.500'), findsWidgets);
     },
     skip: _origin != 'http://localhost:3105',
   );
@@ -307,14 +315,27 @@ Future<void> _waitFor(WidgetTester tester, Finder target) async {
   }
 }
 
-Future<void> _tap(WidgetTester tester, String text) async {
-  final matches = find.text(text);
+final _loginButton = find.widgetWithText(FilledButton, 'Iniciar sesión');
+
+Future<void> _tab(WidgetTester tester, String label) => _tapFinder(
+  tester,
+  find.descendant(of: find.byType(NavigationBar), matching: find.text(label)),
+);
+
+Future<void> _tap(WidgetTester tester, String text) =>
+    _tapFinder(tester, find.text(text));
+
+Future<void> _tapFinder(WidgetTester tester, Finder matches) async {
   await _show(tester, matches, last: true);
   await tester.tap(matches.last);
   await _settle(tester);
 }
 
-Future<void> _show(WidgetTester tester, Finder target, {bool last = false}) async {
+Future<void> _show(
+  WidgetTester tester,
+  Finder target, {
+  bool last = false,
+}) async {
   if (target.evaluate().isEmpty) {
     await tester.scrollUntilVisible(
       target,
@@ -342,11 +363,11 @@ Future<void> _enter(WidgetTester tester, String key, String text) async {
 Future<void> _login(WidgetTester tester, String email) async {
   await _enter(tester, 'email', email);
   await _enter(tester, 'password', _password);
-  await _tap(tester, 'Iniciar sesión');
+  await _tapFinder(tester, _loginButton);
 }
 
 Future<void> _logout(WidgetTester tester) async {
-  await _tap(tester, 'Perfil');
+  await _tab(tester, 'Perfil');
   await _tap(tester, 'Cerrar sesión');
 }
 

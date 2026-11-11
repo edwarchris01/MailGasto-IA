@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/api.dart';
+import '../../core/design.dart';
 import '../../core/format.dart';
 import '../../core/google_browser.dart';
 import '../../core/widgets.dart';
@@ -23,6 +24,24 @@ final mailboxRepositoryProvider = Provider((ref) {
 final mailboxesProvider = FutureProvider.autoDispose(
   (ref) => ref.watch(mailboxRepositoryProvider).list(),
 );
+
+final mailboxFeedbackProvider =
+    NotifierProvider<MailboxFeedback, ({bool cancelled, String? mailboxId})>(
+      MailboxFeedback.new,
+    );
+
+class MailboxFeedback extends Notifier<({bool cancelled, String? mailboxId})> {
+  @override
+  ({bool cancelled, String? mailboxId}) build() {
+    ref.watch(authProvider.select((auth) => auth.asData?.value?.id));
+    return (cancelled: false, mailboxId: null);
+  }
+
+  void start(String? mailboxId) =>
+      state = (cancelled: false, mailboxId: mailboxId);
+
+  void cancel() => state = (cancelled: true, mailboxId: state.mailboxId);
+}
 
 class MailboxRepository {
   MailboxRepository(this.api);
@@ -93,24 +112,29 @@ class _MailboxesScreenState extends ConsumerState<MailboxesScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Vincular con Google'),
-        content: const Text(
-          'MailGasto solicita acceso de solo lectura a Gmail para identificar '
-          'avisos de pagos e ingresos. Puedes retirar el acceso '
-          'en cualquier momento desde Buzones.',
+        scrollable: true,
+        content: const AppNotice(
+          icon: Icons.shield_outlined,
+          title: 'Permiso de lectura',
+          description:
+              'MailGasto solicita acceso de solo lectura a Gmail para identificar '
+              'avisos de pagos e ingresos. Puedes retirar el acceso desde Buzones.',
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
             child: const Text('Cancelar'),
           ),
-          FilledButton(
+          FilledButton.icon(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Continuar con Google'),
+            icon: const Icon(Icons.open_in_new_rounded),
+            label: const Text('Continuar con Google'),
           ),
         ],
       ),
     );
     if (accepted != true || !mounted) return;
+    ref.read(mailboxFeedbackProvider.notifier).start(id);
     final uri = await ref.read(mailboxRepositoryProvider).authorize(id);
     if (!mounted) return;
     await openGoogleAuthorization(
@@ -135,6 +159,7 @@ class _MailboxesScreenState extends ConsumerState<MailboxesScreen> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
+            style: dangerButtonStyle(),
             child: const Text('Desvincular'),
           ),
         ],
@@ -155,125 +180,214 @@ class _MailboxesScreenState extends ConsumerState<MailboxesScreen> {
     }
   });
 
+  Future<void> _reconnect(Mailbox mailbox) async {
+    if (mailbox.source == 'oauth') {
+      await _authorize(mailbox.id);
+    } else {
+      await _run(() async {
+        await ref.read(mailboxRepositoryProvider).reconnectExisting();
+        if (mounted) ref.invalidate(mailboxesProvider);
+      });
+    }
+  }
+
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(
-      leading: BackButton(onPressed: () => context.go('/settings')),
-      title: const Text('Buzones'),
-    ),
-    body: RefreshIndicator(
-      onRefresh: () => ref
-          .refresh(mailboxesProvider.future)
-          .then<void>((_) {}, onError: (Object _) {}),
-      child: ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.all(20),
-        children: [
-          Text(
-            'Cuentas conectadas',
-            style: Theme.of(context).textTheme.titleLarge,
-          ),
-          const SizedBox(height: 8),
-          ref
-              .watch(mailboxesProvider)
-              .when(
-                loading: () => const Center(child: CircularProgressIndicator()),
-                error: (error, _) => RetryMessage(
+  Widget build(BuildContext context) {
+    final state = ref.watch(mailboxesProvider);
+    final feedback = ref.watch(mailboxFeedbackProvider);
+    return Scaffold(
+      appBar: appBackBar('Perfil', () => context.go('/settings')),
+      body: RefreshIndicator(
+        onRefresh: () => ref
+            .refresh(mailboxesProvider.future)
+            .then<void>((_) {}, onError: (Object _) {}),
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: screenPadding,
+          children: [
+            const PageHeading(
+              'Buzones',
+              description: 'Vincula el correo donde recibes avisos bancarios.',
+            ),
+            const SizedBox(height: 16),
+            if (feedback.cancelled) ...[
+              const AppNotice(
+                icon: Icons.cancel_outlined,
+                title: 'Vinculación cancelada',
+                description: 'Puedes volver a abrir Google desde Buzones.',
+                tone: AppTone.warning,
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _busy ? null : () => _authorize(feedback.mailboxId),
+                icon: const Icon(Icons.refresh_rounded),
+                label: const Text('Volver a intentar'),
+              ),
+              const SizedBox(height: 12),
+            ],
+            state.when(
+              loading: () => const LinearProgressIndicator(
+                semanticsLabel: 'Cargando buzones',
+              ),
+              error: (error, _) => AppPanel(
+                child: RetryMessage(
                   error,
                   () => ref.invalidate(mailboxesProvider),
                 ),
-                data: (mailboxes) => Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (mailboxes.isEmpty)
-                      const Text('Aún no tienes buzones vinculados.'),
-                    for (final mailbox in mailboxes)
-                      Card(
-                        child: Padding(
-                          padding: const EdgeInsets.all(16),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                mailbox.email,
-                                style: Theme.of(context).textTheme.titleMedium,
-                              ),
-                              Text(switch (mailbox.state) {
-                                'active' => 'Vinculado',
-                                'reconnect' => 'Reconexión requerida',
-                                'disconnected' => 'Desvinculado',
-                                _ => 'Estado desconocido',
-                              }),
-                              const SizedBox(height: 4),
-                              Text(
-                                mailbox.syncedAt == null
-                                    ? 'Sin fecha de sincronización'
-                                    : 'Última sincronización: ${syncLabel(mailbox.syncedAt!)}',
-                              ),
-                              Wrap(
-                                spacing: 8,
-                                children: [
-                                  if (mailbox.state == 'reconnect' ||
-                                      mailbox.state == 'disconnected')
-                                    TextButton(
-                                      onPressed: _busy
-                                          ? null
-                                          : () {
-                                              if (mailbox.source == 'oauth') {
-                                                _authorize(mailbox.id);
-                                              } else {
-                                                _run(() async {
-                                                  await ref
-                                                      .read(
-                                                        mailboxRepositoryProvider,
-                                                      )
-                                                      .reconnectExisting();
-                                                  if (mounted) {
-                                                    ref.invalidate(
-                                                      mailboxesProvider,
-                                                    );
-                                                  }
-                                                });
-                                              }
-                                            },
-                                      child: const Text('Reconectar'),
-                                    ),
-                                  if (mailbox.state != 'disconnected')
-                                    TextButton(
-                                      onPressed: _busy
-                                          ? null
-                                          : () => _disconnect(mailbox),
-                                      child: const Text('Desvincular'),
-                                    ),
-                                ],
-                              ),
-                            ],
+              ),
+              data: (mailboxes) => mailboxes.isEmpty
+                  ? const AppNotice(
+                      icon: Icons.mail_outline,
+                      title: 'Aún no tienes buzones vinculados.',
+                    )
+                  : Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        for (final (index, mailbox) in mailboxes.indexed) ...[
+                          if (index > 0) const SizedBox(height: 12),
+                          _MailboxCard(
+                            mailbox,
+                            onReconnect: _busy
+                                ? null
+                                : () => _reconnect(mailbox),
+                            onDisconnect: _busy
+                                ? null
+                                : () => _disconnect(mailbox),
                           ),
-                        ),
-                      ),
+                        ],
+                      ],
+                    ),
+            ),
+            const SizedBox(height: 14),
+            FilledButton.icon(
+              onPressed: _busy ? null : _authorize,
+              icon: const Icon(Icons.add_rounded),
+              label: const Text('Vincular Gmail'),
+            ),
+            const SizedBox(height: 13),
+            const AppNotice(
+              icon: Icons.shield_outlined,
+              title: 'Acceso de solo lectura',
+              description:
+                  'MailGasto identifica avisos bancarios en el buzón autorizado.',
+            ),
+            const SizedBox(height: 12),
+            AppPanel(
+              padding: const EdgeInsets.all(11),
+              child: Row(
+                children: [
+                  const IconTile(
+                    Icons.mail_outline,
+                    tone: AppTone.neutral,
+                    size: 36,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Outlook',
+                      style: Theme.of(
+                        context,
+                      ).textTheme.titleMedium?.copyWith(color: AppColors.muted),
+                    ),
+                  ),
+                  const SizedBox(width: 5),
+                  const Flexible(
+                    child: AppBadge('Próximamente', tone: AppTone.neutral),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MailboxCard extends StatelessWidget {
+  const _MailboxCard(
+    this.mailbox, {
+    required this.onReconnect,
+    required this.onDisconnect,
+  });
+  final Mailbox mailbox;
+  final VoidCallback? onReconnect, onDisconnect;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final (label, tone) = switch (mailbox.state) {
+      'active' => ('Vinculado', AppTone.income),
+      'reconnect' => ('Por reconectar', AppTone.warning),
+      'disconnected' => ('Desvinculado', AppTone.neutral),
+      _ => ('Estado desconocido', AppTone.neutral),
+    };
+    final reconnect =
+        mailbox.state == 'reconnect' || mailbox.state == 'disconnected';
+    final reconnectButton = FilledButton.tonalIcon(
+      onPressed: onReconnect,
+      icon: const Icon(Icons.refresh_rounded),
+      label: const Text('Reconectar'),
+    );
+    final disconnectButton = OutlinedButton(
+      onPressed: onDisconnect,
+      child: const Text('Desvincular'),
+    );
+    return AppPanel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              IconTile(
+                mailbox.state == 'reconnect'
+                    ? Icons.mark_email_unread_outlined
+                    : Icons.mail_outline,
+                tone: mailbox.state == 'reconnect'
+                    ? AppTone.warning
+                    : AppTone.info,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TrailingRow(
+                      leading: Text('Gmail', style: text.titleLarge),
+                      trailing: AppBadge(label, tone: tone),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(mailbox.email, style: text.bodySmall),
                   ],
                 ),
               ),
-          const SizedBox(height: 20),
-          FilledButton.icon(
-            onPressed: _busy ? null : _authorize,
-            icon: const Icon(Icons.add_link),
-            label: const Text('Vincular Gmail'),
+            ],
           ),
-          const ListTile(
-            leading: Icon(Icons.shield_outlined),
-            title: Text('Acceso de solo lectura'),
-            subtitle: Text(
-              'Identificamos avisos de pagos e ingresos en el buzón autorizado.',
+          if (mailbox.syncedAt case final sync?) ...[
+            const SizedBox(height: 12),
+            TrailingRow(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              leading: Text('Última sincronización', style: text.labelSmall),
+              trailing: Text(
+                syncLabel(sync),
+                textAlign: TextAlign.end,
+                style: text.bodySmall,
+              ),
             ),
-          ),
-          const ListTile(
-            leading: Icon(Icons.mail_outline),
-            title: Text('Outlook'),
-            subtitle: Text('Próximamente'),
-          ),
+          ] else if (mailbox.state == 'active') ...[
+            const SizedBox(height: 10),
+            Text('Sin fecha de sincronización', style: text.bodySmall),
+          ],
+          const SizedBox(height: 10),
+          if (mailbox.state == 'reconnect')
+            FormPair(first: reconnectButton, second: disconnectButton)
+          else if (reconnect)
+            reconnectButton
+          else
+            disconnectButton,
         ],
       ),
-    ),
-  );
+    );
+  }
 }
