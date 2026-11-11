@@ -228,6 +228,14 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
     'analytics?from=' + review.date + '&to=' + review.date + '&currency=COP', 'GET', undefined, owner,
   )).json();
   assert.equal(reviewReport.incomeMinor, review.amountMinor);
+  const confirmedPath = 'movements/' + movement.id;
+  assert.equal((await request(confirmedPath + '/email-details', 'PATCH', { category: 'compras' }, owner)).status, 400);
+  assert.equal((await request(confirmedPath + '/email-details', 'PATCH', { note: 'Abono verificado' }, owner)).status, 204);
+  assert.equal((await request(confirmedPath + '/correction', 'PATCH', { revision: 0, amountMinor: '4300000' }, owner)).status, 204);
+  assert.deepEqual(await (await confirm(pendingPath)).json(), movement);
+  const corrected = await (await request(confirmedPath, 'GET', undefined, owner)).json();
+  assert.deepEqual([corrected.amount_minor, corrected.original_amount_minor, corrected.category, corrected.note],
+    ['4300000', review.amountMinor, 'ingresos', 'Abono verificado']);
 
   const addPending = async (messageId: string) => {
     assert.equal((await (await post({ ...pending, messageId })).json()).outcome, 'stored');

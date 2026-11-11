@@ -6,9 +6,11 @@ import '../../core/api.dart';
 import '../../core/design.dart';
 import '../../core/format.dart';
 import '../../core/widgets.dart';
+import 'email_movement_screens.dart';
 import 'expenses.dart';
 import 'finance.dart';
 import 'finance_screens.dart';
+import 'movement_fields.dart';
 import 'notice_style.dart';
 
 class MovementsScreen extends ConsumerWidget {
@@ -526,10 +528,12 @@ class _NoticeTile extends StatelessWidget {
   }
 }
 
+enum MovementView { detail, edit, correction, corrections }
+
 class MovementScreen extends ConsumerWidget {
-  const MovementScreen(this.id, {super.key, this.editing = false});
+  const MovementScreen(this.id, {super.key, this.view = MovementView.detail});
   final String id;
-  final bool editing;
+  final MovementView view;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -537,6 +541,7 @@ class MovementScreen extends ConsumerWidget {
     return ref
         .watch(provider)
         .when(
+          skipError: view == MovementView.correction,
           loading: () => Scaffold(
             appBar: AppBar(title: const Text('Detalle')),
             body: const Center(child: CircularProgressIndicator()),
@@ -545,9 +550,23 @@ class MovementScreen extends ConsumerWidget {
             appBar: AppBar(title: const Text('Detalle')),
             body: RetryMessage(error, () => ref.invalidate(provider)),
           ),
-          data: (item) => editing && item.manual
-              ? MovementForm(existing: item)
-              : _MovementDetail(item),
+          data: (item) {
+            if (item.manual && view == MovementView.edit) {
+              return MovementForm(existing: item);
+            }
+            final details = item.emailDetails;
+            if (details == null) return _MovementDetail(item);
+            return switch (view) {
+              MovementView.detail => _MovementDetail(item),
+              MovementView.edit => EmailMovementDetailsForm(item, details),
+              MovementView.correction => EmailMovementCorrectionForm(
+                item,
+                details,
+                key: ValueKey((item.id, details.revision)),
+              ),
+              MovementView.corrections => EmailCorrectionHistoryScreen(item),
+            };
+          },
         );
   }
 }
@@ -601,6 +620,7 @@ class _MovementDetailState extends ConsumerState<_MovementDetail> {
   @override
   Widget build(BuildContext context) {
     final item = widget.item;
+    final details = item.emailDetails;
     final tone = item.income ? AppTone.income : AppTone.expense;
     final text = Theme.of(context).textTheme;
     return Scaffold(
@@ -648,6 +668,11 @@ class _MovementDetailState extends ConsumerState<_MovementDetail> {
             ('Categoría', categories[item.category] ?? item.category),
             ('Medio de pago', item.method ?? 'Sin especificar'),
             ('Origen', movementSources[item.source] ?? item.source),
+            if (details?.note case final note?) ('Nota', note),
+            if (details != null && details.revision > 0) ...[
+              ('Monto original', money(details.originalMinor, item.currency)),
+              ('Fecha original', shortDay(details.originalDate)),
+            ],
           ]),
           if (item.manual) ...[
             const SizedBox(height: 12),
@@ -666,6 +691,31 @@ class _MovementDetailState extends ConsumerState<_MovementDetail> {
                 label: const Text('Eliminar'),
               ),
             ),
+          ],
+          if (details != null) ...[
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () =>
+                  context.push('/history/movement/${item.id}/edit'),
+              icon: const Icon(Icons.edit_outlined),
+              label: Text(emailDetailsLabel(item)),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () =>
+                  context.push('/history/movement/${item.id}/correction'),
+              icon: const Icon(Icons.tune_rounded),
+              label: const Text('Corregir datos'),
+            ),
+            if (details.revision > 0) ...[
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: () =>
+                    context.push('/history/movement/${item.id}/corrections'),
+                icon: const Icon(Icons.history_rounded),
+                label: const Text('Historial de correcciones'),
+              ),
+            ],
           ],
           if (item.matches.isNotEmpty) ...[
             const SizedBox(height: 18),
@@ -939,22 +989,6 @@ class _MovementFormState extends ConsumerState<MovementForm> {
     };
   }
 
-  Future<void> _pickDate() async {
-    final today = DateUtils.dateOnly(bogotaNow());
-    final first = DateTime(1900);
-    final selected = DateTime.tryParse(_date ?? '') ?? today;
-    final value = await showDatePicker(
-      context: context,
-      initialDate: selected.isBefore(first) || selected.isAfter(today)
-          ? today
-          : selected,
-      firstDate: first,
-      lastDate: today,
-      currentDate: today,
-    );
-    if (mounted && value != null) setState(() => _date = isoDay(value));
-  }
-
   @override
   Widget build(BuildContext context) {
     final notice = widget.notice != null;
@@ -1054,68 +1088,20 @@ class _MovementFormState extends ConsumerState<MovementForm> {
                 ),
               ),
               const SizedBox(height: 12),
-              LabeledField(
-                'Fecha',
-                child: OutlinedButton(
-                  onPressed: _busy ? null : _pickDate,
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.ink,
-                    side: const BorderSide(color: AppColors.border),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 13,
-                      vertical: 10,
-                    ),
-                    textStyle: Theme.of(context).textTheme.bodyLarge,
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          _date == null
-                              ? 'Seleccionar fecha'
-                              : shortDay(_date!),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      const Icon(
-                        Icons.calendar_month_outlined,
-                        color: AppColors.muted,
-                        size: 18,
-                      ),
-                    ],
-                  ),
-                ),
+              MovementDateField(
+                date: _date,
+                onChanged: _busy
+                    ? null
+                    : (value) => setState(() => _date = value),
               ),
               const SizedBox(height: 12),
               if (_direction == 'expense')
                 FormPair(
-                  first: LabeledField(
-                    'Categoría',
-                    child: DropdownButtonFormField<String>(
-                      key: const ValueKey('movement-category'),
-                      initialValue: _category,
-                      decoration: const InputDecoration(),
-                      isExpanded: true,
-                      icon: const Icon(
-                        Icons.keyboard_arrow_down_rounded,
-                        size: 18,
-                        color: AppColors.muted,
-                      ),
-                      hint: const Text('Selecciona'),
-                      items: [
-                        for (final entry in categories.entries)
-                          if (entry.key != 'ingresos')
-                            DropdownMenuItem(
-                              value: entry.key,
-                              child: Text(entry.value),
-                            ),
-                      ],
-                      onChanged: _busy
-                          ? null
-                          : (value) => setState(() => _category = value),
-                      validator: (value) =>
-                          value == null ? 'Selecciona una categoría.' : null,
-                    ),
+                  first: ExpenseCategoryField(
+                    category: _category,
+                    onChanged: _busy
+                        ? null
+                        : (value) => setState(() => _category = value),
                   ),
                   second: method,
                 )
@@ -1162,17 +1148,4 @@ class _MovementFormState extends ConsumerState<MovementForm> {
       ),
     );
   }
-}
-
-BigInt? parseMinor(String text) {
-  var value = text.trim();
-  if (RegExp(r'^\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?$').hasMatch(value)) {
-    value = value.replaceAll('.', '');
-  }
-  if (!RegExp(r'^\d{1,16}(?:[,.]\d{1,2})?$').hasMatch(value)) return null;
-  final parts = value.split(RegExp(r'[,.]'));
-  final amount = BigInt.parse(
-    parts.first + (parts.length > 1 ? parts.last.padRight(2, '0') : '00'),
-  );
-  return amount > BigInt.zero ? amount : null;
 }

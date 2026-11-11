@@ -49,6 +49,19 @@ String money(BigInt minor, String currency) {
   return '${minor.isNegative ? '− ' : ''}$currency $units,$cents';
 }
 
+BigInt? parseMinor(String text) {
+  var value = text.trim();
+  if (RegExp(r'^\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?$').hasMatch(value)) {
+    value = value.replaceAll('.', '');
+  }
+  if (!RegExp(r'^\d{1,16}(?:[,.]\d{1,2})?$').hasMatch(value)) return null;
+  final parts = value.split(RegExp(r'[,.]'));
+  final amount = BigInt.parse(
+    parts.first + (parts.length > 1 ? parts.last.padRight(2, '0') : '00'),
+  );
+  return amount > BigInt.zero ? amount : null;
+}
+
 String displayMoney(BigInt minor, String currency, {bool symbol = true}) {
   final formatted = money(minor.abs(), currency).substring(currency.length + 1);
   final value = formatted.endsWith(',00')

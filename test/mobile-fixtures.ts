@@ -46,7 +46,7 @@ async function main() {
         [owner.id, email],
       );
       await client.query('DELETE FROM notices WHERE mailbox_id=$1 AND message_id=ANY($2::text[])',
-        [mailbox.id, ['pending', 'pending-other']]);
+        [mailbox.id, ['cop', 'pending', 'pending-other']]);
       for (const [id, day, currency, minor, category, provider = 'nequi'] of [
         ['cop', current, 'COP', 2_500_000, 'alimentacion'],
         ['usd', current, 'USD', 1250, 'transporte'],

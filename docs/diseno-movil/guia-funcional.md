@@ -49,6 +49,8 @@ Los filtros ofrecen **Este mes**, **Mes anterior**, **Últimos seis meses** y **
 
 Al abrir un movimiento, mostrar tipo, importe, moneda, fecha, descripción, categoría, medio de pago y origen. En avisos, mostrar el estado y los campos disponibles. Un **Pendiente** indica qué campo falta o qué dato está por confirmar y explica cómo reenviar el aviso original. **En proceso** indica que se está validando. **Error** muestra un motivo entendible cuando está disponible.
 
+En un movimiento de correo, el detalle permite añadir o borrar una nota y cambiar la categoría de un gasto. **Corregir datos** permite corregir el monto o la fecha y restaurar cada valor original. Los valores vigentes se usan en los totales y filtros. **Historial de correcciones** muestra cada cambio de monto o fecha con sus valores anterior y nuevo y la hora de Bogotá.
+
 ### Registro manual y revisión de coincidencias
 
 El usuario elige **Ingreso** o **Gasto**, ingresa un monto positivo, selecciona moneda y fecha y puede añadir medio de pago y descripción. En un gasto elige una categoría. Un ingreso usa la categoría **Ingresos**. El formulario parte de la moneda seleccionada y la fecha de hoy en Colombia. Si se abre desde Ingresos o Gastos, preselecciona ese tipo. Al guardar, volver al historial y actualizar Inicio, Análisis y las consultas posteriores.

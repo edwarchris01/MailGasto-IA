@@ -8,7 +8,7 @@ import { Accounts, input, loginInput, normalizedEmail, registerInput, sessionHas
 import { CONFIG, Config, equalSecret } from './config.js';
 import { Database } from './db.js';
 import { Gmail } from './gmail.js';
-import { analyticsInput, Finance, manualInput, movementFilters } from './finance.js';
+import { analyticsInput, correctionInput, correctionsQuery, emailDetailsInput, Finance, manualInput, movementFilters } from './finance.js';
 import { GoogleSignin } from './google-signin.js';
 import { gmailResult, GmailResults } from './gmail-results.js';
 import { chatInput, filtersSchema, History, historySchema } from './history.js';
@@ -278,6 +278,26 @@ export class Api {
   async editMovement(@Req() req: Request, @Param('id') id: string, @Body() body: unknown) {
     const owner = await this.accounts.current(req);
     await this.finance.edit(owner.id, input(uuid, id), input(manualInput, body));
+  }
+
+  @Patch('movements/:id/email-details')
+  @HttpCode(204)
+  async editEmailDetails(@Req() req: Request, @Param('id') id: string, @Body() body: unknown) {
+    const owner = await this.accounts.current(req);
+    await this.finance.editEmailDetails(owner.id, input(uuid, id), input(emailDetailsInput, body));
+  }
+
+  @Patch('movements/:id/correction')
+  @HttpCode(204)
+  async correctEmailMovement(@Req() req: Request, @Param('id') id: string, @Body() body: unknown) {
+    const owner = await this.accounts.current(req);
+    await this.finance.correctEmailMovement(owner.id, input(uuid, id), input(correctionInput, body));
+  }
+
+  @Get('movements/:id/corrections')
+  async emailCorrections(@Req() req: Request, @Param('id') id: string, @Query() query: unknown) {
+    const owner = await this.accounts.current(req);
+    return this.finance.emailCorrections(owner.id, input(uuid, id), input(correctionsQuery, query).beforeRevision);
   }
 
   @Delete('movements/:id')

@@ -92,7 +92,23 @@ final routerProvider = Provider((ref) {
                         parentNavigatorKey: rootNavigator,
                         builder: (_, state) => MovementScreen(
                           state.pathParameters['id']!,
-                          editing: true,
+                          view: MovementView.edit,
+                        ),
+                      ),
+                      GoRoute(
+                        path: 'correction',
+                        parentNavigatorKey: rootNavigator,
+                        builder: (_, state) => MovementScreen(
+                          state.pathParameters['id']!,
+                          view: MovementView.correction,
+                        ),
+                      ),
+                      GoRoute(
+                        path: 'corrections',
+                        parentNavigatorKey: rootNavigator,
+                        builder: (_, state) => MovementScreen(
+                          state.pathParameters['id']!,
+                          view: MovementView.corrections,
                         ),
                       ),
                     ],

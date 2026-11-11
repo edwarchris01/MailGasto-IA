@@ -347,14 +347,14 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                       ),
                     ] else ...[
                       const _AccessHero(),
-                      const SizedBox(height: 24),
+                      const SizedBox(height: 18),
                       const PageHeading(
                         'Iniciar sesión',
                         description:
                             'Consulta tus ingresos y gastos en un solo lugar.',
                       ),
                     ],
-                    const SizedBox(height: 20),
+                    SizedBox(height: widget.register ? 20 : 14),
                     if (widget.register) ...[
                       LabeledField(
                         'Nombre',
@@ -391,7 +391,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                             : null,
                       ),
                     ),
-                    const SizedBox(height: 10),
+                    SizedBox(height: widget.register ? 10 : 8),
                     PasswordField(
                       fieldKey: const ValueKey('password'),
                       label: 'Contraseña',
@@ -460,9 +460,9 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                         child: const Text('Ya tengo una cuenta'),
                       ),
                     ] else ...[
-                      const SizedBox(height: 14),
+                      const SizedBox(height: 10),
                       const Divider(height: 1),
-                      const SizedBox(height: 14),
+                      const SizedBox(height: 10),
                       Text(
                         '¿Primera vez en MailGasto?',
                         textAlign: TextAlign.center,
@@ -470,7 +470,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                           context,
                         ).textTheme.bodySmall?.copyWith(fontSize: 13),
                       ),
-                      const SizedBox(height: 9),
+                      const SizedBox(height: 8),
                       OutlinedButton(
                         onPressed: _busy
                             ? null
@@ -479,7 +479,20 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                       ),
                       const SizedBox(height: 8),
                       OutlinedButton.icon(
-                        icon: const Icon(Icons.account_circle_outlined),
+                        icon: const Image(
+                          image: AssetImage('assets/google-g.png'),
+                          width: 18,
+                          height: 18,
+                          excludeFromSemantics: true,
+                        ),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFF1F1F1F),
+                          side: const BorderSide(color: Color(0xFF747775)),
+                          textStyle: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
                         onPressed: _busy ? null : _google,
                         label: const Text('Continuar con Google'),
                       ),
@@ -563,9 +576,9 @@ class _AccessHero extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-    constraints: const BoxConstraints(minHeight: 156),
+    constraints: BoxConstraints(minHeight: markOnly ? 156 : 132),
     alignment: Alignment.center,
-    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+    padding: EdgeInsets.symmetric(horizontal: 12, vertical: markOnly ? 16 : 10),
     decoration: BoxDecoration(
       color: markOnly ? AppColors.blueTint : null,
       gradient: markOnly

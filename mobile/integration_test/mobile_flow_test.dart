@@ -4,6 +4,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:integration_test/integration_test.dart';
+import 'package:mailgasto/core/format.dart';
 import 'package:mailgasto/main.dart' as app;
 
 const _origin = String.fromEnvironment('API_BASE_URL');
@@ -298,6 +299,127 @@ void main() {
     },
     skip: _origin != 'http://localhost:3105',
   );
+
+  testWidgets(
+    'Edita un movimiento de correo y conserva sus correcciones en Android',
+    (tester) async {
+      const storage = FlutterSecureStorage();
+      await storage.delete(key: 'mailgasto_session@$_origin');
+      addTearDown(() => storage.delete(key: 'mailgasto_session@$_origin'));
+      app.main();
+      await _settle(tester);
+      await _login(tester, _email);
+      await _tab(tester, 'Movimientos');
+      final original = find.text('Comercio ficticio');
+      await _waitFor(tester, original);
+      await _tapFinder(tester, original);
+      final detail = find.text('Detalle del movimiento');
+      expect(detail, findsOneWidget);
+      final id = GoRouterState.of(tester.element(detail)).pathParameters['id']!;
+      expect(find.text('Historial de correcciones'), findsNothing);
+
+      const note = 'Recibo revisado en Android';
+      const edit = 'Editar categoría y nota';
+      const correct = 'Corregir datos';
+      const save = 'Guardar cambios';
+      await _tap(tester, edit);
+      await _tapFinder(tester, find.byKey(const ValueKey('movement-category')));
+      await _tap(tester, 'Compras');
+      await _enter(tester, 'movement-note', note);
+      await _tap(tester, save);
+      await _waitFor(tester, find.text(note));
+      expect(find.text(note), findsOneWidget);
+      expect(find.text('Compras'), findsOneWidget);
+
+      await _tap(tester, correct);
+      expect(
+        find.textContaining('Monto original: COP 25.000,00'),
+        findsOneWidget,
+      );
+      await _enter(tester, 'movement-amount', '30.000');
+      await _tap(tester, save);
+      await _waitFor(tester, find.text('− COP 30.000,00'));
+      expect(find.text('− COP 30.000,00'), findsOneWidget);
+
+      await _tap(tester, correct);
+      final today = bogotaNow();
+      final previousMonth = DateTime(today.year, today.month - 1, 12);
+      await _tapFinder(tester, find.byKey(const ValueKey('movement-date')));
+      final dialog = find.byType(DatePickerDialog);
+      final labels = MaterialLocalizations.of(tester.element(dialog));
+      await _tapFinder(tester, find.byTooltip(labels.inputDateModeButtonLabel));
+      await tester.enterText(
+        find.descendant(of: dialog, matching: find.byType(TextFormField)),
+        labels.formatCompactDate(previousMonth),
+      );
+      await _tap(tester, labels.okButtonLabel);
+      await _tap(tester, save);
+      await _waitFor(tester, detail);
+      expect(find.text(shortDay(isoDay(previousMonth))), findsOneWidget);
+
+      await _tap(tester, 'Historial de correcciones');
+      await _waitFor(tester, find.text('Fecha nueva'));
+      expect(find.text('Fecha nueva'), findsOneWidget);
+      expect(find.text('COP 25.000,00'), findsOneWidget);
+      expect(find.text('COP 30.000,00'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('Fecha nueva')).dy,
+        lessThan(tester.getTopLeft(find.text('Monto anterior')).dy),
+      );
+      await _tapFinder(tester, find.byType(BackButton).hitTestable());
+
+      await _tab(tester, 'Inicio');
+      await _tapFinder(tester, find.byKey(const ValueKey('home-period')));
+      await _tap(tester, 'Mes anterior');
+      final movedTotal = find.text(r'$35.000');
+      await _waitFor(tester, movedTotal);
+      expect(movedTotal, findsWidgets);
+      await _tab(tester, 'Movimientos');
+
+      await _tap(tester, correct);
+      await _enter(tester, 'movement-amount', '31.000');
+      await _correctFromAnotherSession(id);
+      await _tap(tester, save);
+      await _waitFor(tester, find.text('Recargar datos'));
+      final amountField = find.byKey(const ValueKey('movement-amount'));
+      expect(
+        tester.widget<TextFormField>(amountField).controller!.text,
+        '31.000',
+      );
+      await _tap(tester, 'Recargar datos');
+      expect(
+        tester.widget<TextFormField>(amountField).controller!.text,
+        '32.000,00',
+      );
+
+      final restore = find.widgetWithText(TextButton, 'Usar original');
+      await _tapFinder(tester, restore.first);
+      await _tapFinder(tester, restore.last);
+      await _tap(tester, save);
+      await _waitFor(tester, find.text('− COP 25.000,00'));
+      expect(find.text('− COP 25.000,00'), findsOneWidget);
+      await _tap(tester, 'Historial de correcciones');
+      await _waitFor(tester, find.text('COP 32.000,00'));
+      expect(find.text('COP 32.000,00'), findsWidgets);
+      expect(find.text('Fecha nueva'), findsWidgets);
+      await _tapFinder(tester, find.byType(BackButton).hitTestable());
+
+      await _tap(tester, edit);
+      final noteField = find.byKey(const ValueKey('movement-note'));
+      expect(tester.widget<TextFormField>(noteField).controller!.text, note);
+      await _enter(tester, 'movement-note', '');
+      await _tap(tester, save);
+      await _waitFor(tester, detail);
+      expect(find.text(note), findsNothing);
+      expect(find.text('Compras'), findsOneWidget);
+
+      await _tab(tester, 'Inicio');
+      final restoredTotal = find.text(r'$5.000');
+      await _waitFor(tester, restoredTotal);
+      expect(restoredTotal, findsWidgets);
+    },
+    skip: _origin != 'http://localhost:3105',
+  );
 }
 
 Future<void> _settle(WidgetTester tester) async {
@@ -369,6 +491,31 @@ Future<void> _login(WidgetTester tester, String email) async {
 Future<void> _logout(WidgetTester tester) async {
   await _tab(tester, 'Perfil');
   await _tap(tester, 'Cerrar sesión');
+}
+
+Future<void> _correctFromAnotherSession(String movementId) async {
+  final client = Dio(
+    BaseOptions(
+      baseUrl: '$_origin/v1/',
+      headers: {'Origin': _origin},
+      connectTimeout: const Duration(seconds: 5),
+    ),
+  );
+  try {
+    final login = await client.post<Map<String, dynamic>>(
+      'auth/login',
+      data: {'email': _email, 'password': _password},
+    );
+    final cookie = login.headers['set-cookie']!.first.split(';').first;
+    final response = await client.patch<void>(
+      'movements/$movementId/correction',
+      data: {'revision': 2, 'amountMinor': '3200000'},
+      options: Options(headers: {'Cookie': cookie}),
+    );
+    expect(response.statusCode, 204);
+  } finally {
+    client.close();
+  }
 }
 
 Future<void> _verifyEmail(String email) async {

@@ -17,8 +17,14 @@ export const historySchema = filtersSchema.extend({
 export const chatInput = z.object({ message: z.string().trim().min(1).max(1000) });
 type Filters = z.infer<typeof filtersSchema>;
 type ChatFilters = Filters & { kind?: 'income' | 'expense' | 'comparison'; currency?: 'COP' | 'USD' | 'EUR' };
+const noticeCategory = 'coalesce(a.category,t.category)';
+const noticePeriodDate = "coalesce(a.transaction_date,t.transaction_date,(n.received_at AT TIME ZONE 'America/Bogota')::date)";
 const selection = 'n.id,n.provider,n.forwarded,n.received_at,n.status,n.reason,n.confidence,' +
-  't.amount_minor::text AS amount_minor,t.currency,t.transaction_date::text,t.payment_method,t.description,t.category,t.direction';
+  'coalesce(a.amount_minor,t.amount_minor)::text AS amount_minor,t.currency,' +
+  'coalesce(a.transaction_date,t.transaction_date)::text AS transaction_date,t.payment_method,t.description,' +
+  noticeCategory + ' AS category,t.direction';
+const noticeSource = 'FROM notices n JOIN mailboxes m ON m.id=n.mailbox_id LEFT JOIN transactions t ON t.notice_id=n.id ' +
+  "LEFT JOIN email_movement_adjustments a ON a.movement_id=t.id AND n.status='registered' ";
 const reviewFields = ['amount_minor', 'currency', 'transaction_date', 'payment_method', 'description', 'category', 'direction'];
 
 function range(filters: Filters) {
@@ -48,11 +54,9 @@ export class History {
       filters.limit + 1, (filters.page - 1) * filters.limit, filters.unregistered === 'true',
     ];
     const { rows } = await this.db.query(
-      'SELECT ' + selection + ' FROM notices n JOIN mailboxes m ON m.id=n.mailbox_id ' +
-      "LEFT JOIN transactions t ON t.notice_id=n.id WHERE m.account_id=$1 AND n.status<>'discarded' " +
-      "AND ($2::date IS NULL OR coalesce(t.transaction_date,(n.received_at AT TIME ZONE 'America/Bogota')::date)>=$2) " +
-      "AND ($3::date IS NULL OR coalesce(t.transaction_date,(n.received_at AT TIME ZONE 'America/Bogota')::date)<=$3) " +
-      "AND ($4::text IS NULL OR t.category=$4) AND ($5::text IS NULL OR n.status=$5) AND (NOT $8::boolean OR n.status<>'registered') " +
+      'SELECT ' + selection + ' ' + noticeSource + "WHERE m.account_id=$1 AND n.status<>'discarded' " +
+      'AND ($2::date IS NULL OR ' + noticePeriodDate + '>=$2) AND ($3::date IS NULL OR ' + noticePeriodDate + '<=$3) ' +
+      'AND ($4::text IS NULL OR ' + noticeCategory + "=$4) AND ($5::text IS NULL OR n.status=$5) AND (NOT $8::boolean OR n.status<>'registered') " +
       'ORDER BY n.received_at DESC,n.id DESC LIMIT $6 OFFSET $7', values,
     );
     return { items: rows.slice(0, filters.limit), page: filters.page, hasMore: rows.length > filters.limit };
@@ -60,8 +64,8 @@ export class History {
 
   async detail(account: string, id: string) {
     const { rows: [record] } = await this.db.query(
-      'SELECT ' + selection + ',n.unconfirmed_fields FROM notices n JOIN mailboxes m ON m.id=n.mailbox_id ' +
-      "LEFT JOIN transactions t ON t.notice_id=n.id WHERE m.account_id=$1 AND n.id=$2 AND n.status<>'discarded'", [account, id],
+      'SELECT ' + selection + ',n.unconfirmed_fields ' + noticeSource +
+      "WHERE m.account_id=$1 AND n.id=$2 AND n.status<>'discarded'", [account, id],
     );
     if (!record) throw new NotFoundException('Aviso no encontrado.');
     return record;
@@ -109,12 +113,11 @@ export class History {
   async summary(account: string, filters: Filters) {
     range(filters);
     const { rows } = await this.db.query<{ currency: string; category: string | null; amount_minor: string; count: number }>(
-      'SELECT t.currency,t.category,sum(t.amount_minor)::text AS amount_minor,count(*)::int AS count ' +
-      'FROM transactions t JOIN notices n ON n.id=t.notice_id JOIN mailboxes m ON m.id=n.mailbox_id ' +
-      "WHERE m.account_id=$1 AND n.status='registered' AND t.direction='expense' " +
-      'AND ($2::date IS NULL OR t.transaction_date>=$2) AND ($3::date IS NULL OR t.transaction_date<=$3) ' +
-      'AND ($4::text IS NULL OR t.category=$4) GROUP BY GROUPING SETS ((t.currency),(t.currency,t.category)) ' +
-      'ORDER BY t.currency,t.category NULLS FIRST', [account, filters.from ?? null, filters.to ?? null, filters.category ?? null],
+      'SELECT currency,category,sum(amount_minor)::text AS amount_minor,count(*)::int AS count FROM confirmed_movements ' +
+      "WHERE account_id=$1 AND source='email' AND direction='expense' " +
+      'AND ($2::date IS NULL OR transaction_date>=$2) AND ($3::date IS NULL OR transaction_date<=$3) ' +
+      'AND ($4::text IS NULL OR category=$4) GROUP BY GROUPING SETS ((currency),(currency,category)) ' +
+      'ORDER BY currency,category NULLS FIRST', [account, filters.from ?? null, filters.to ?? null, filters.category ?? null],
     );
     return { totals: rows.filter(row => !row.category), categories: rows.filter(row => row.category) };
   }

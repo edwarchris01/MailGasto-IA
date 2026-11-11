@@ -55,7 +55,7 @@ class BrandLockup extends StatelessWidget {
     return hero
         ? Column(
             mainAxisSize: MainAxisSize.min,
-            children: [const BrandMark(86), const SizedBox(height: 9), name],
+            children: [const BrandMark(74), const SizedBox(height: 7), name],
           )
         : Row(
             children: [

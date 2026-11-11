@@ -3,7 +3,7 @@ import { createHash, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { test } from 'node:test';
 import { OAuth2Client } from 'google-auth-library';
 import { DateTime } from 'luxon';
-import { readConfig, decrypt, token } from '../src/config.js';
+import { readConfig, decrypt, hash, token } from '../src/config.js';
 import { Database } from '../src/db.js';
 import { createApp } from '../src/main.js';
 
@@ -113,6 +113,124 @@ test('combina avisos y manuales, conserva monedas y protege datos y credenciales
   assert.equal((await request('auth/password/reset/confirm', 'POST', { token: code, password })).status, 422);
   assert.equal((await request('auth/me', 'GET', undefined, cookie)).status, 401);
   await login(email);
+});
+
+test('edita movimientos de correo y conserva el historial por cuenta y revisión', { skip: !connection }, async t => {
+  const { app, db, request } = await fixture('http://localhost:3105');
+  const [ownerId, otherId] = [randomUUID(), randomUUID()];
+  t.after(async () => {
+    try { await db.query('DELETE FROM accounts WHERE id=ANY($1)', [[ownerId, otherId]]); }
+    finally { await app.close(); }
+  });
+  const session = async (id: string) => {
+    const email = id + '@example.test';
+    const secret = token();
+    await db.query("INSERT INTO accounts (id,email,name,verified_at) VALUES ($1,$2,'Prueba',now())", [id, email]);
+    await db.query("INSERT INTO sessions VALUES ($1,$2,now()+interval '1 hour')", [hash(secret), id]);
+    return 'mailgasto_session=' + secret;
+  };
+  const owner = await session(ownerId);
+  const other = await session(otherId);
+  const today = DateTime.now().setZone('America/Bogota');
+  const date = today.toISODate()!;
+  const previous = today.minus({ days: 1 }).toISODate()!;
+  const period = (day: string) => `from=${day}&to=${day}&currency=COP`;
+  const { rows: [mailbox] } = await db.query<{ id: string }>(
+    "INSERT INTO mailboxes (account_id,email,source,state) VALUES ($1,$2,'n8n','active') RETURNING id",
+    [ownerId, ownerId + '@example.test'],
+  );
+  const { rows: [notice] } = await db.query<{ id: string }>(
+    "INSERT INTO notices (mailbox_id,message_id,received_at,provider,forwarded,status) " +
+    "VALUES ($1,'movement-corrections',now(),'nequi',false,'registered') RETURNING id", [mailbox.id],
+  );
+  const { rows: [movement] } = await db.query<{ id: string }>(
+    'INSERT INTO transactions (notice_id,amount_minor,currency,transaction_date,payment_method,description,category,direction) ' +
+    "VALUES ($1,2500000,'COP',$2,'Nequi','Compra por correo','alimentacion','expense') RETURNING id", [notice.id, date],
+  );
+  const path = 'movements/' + movement.id;
+  const get = async (endpoint: string) => {
+    const response = await request(endpoint, 'GET', undefined, owner);
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  const edit = (data: unknown, cookie = owner) => request(path + '/email-details', 'PATCH', data, cookie);
+  const correct = (data: unknown, cookie = owner) => request(path + '/correction', 'PATCH', data, cookie);
+
+  assert.deepEqual(await get(path + '/corrections'), { items: [], nextBeforeRevision: null });
+  assert.equal((await edit({ note: 'Otra cuenta' }, other)).status, 404);
+  assert.equal((await correct({ revision: 0, amountMinor: '3000000' }, other)).status, 404);
+  assert.equal((await request(path + '/corrections', 'GET', undefined, other)).status, 404);
+  assert.equal((await edit({ category: 'ingresos' })).status, 400);
+  assert.equal((await edit({ note: 'a'.repeat(201) })).status, 400);
+  assert.equal((await edit({ note: '🧾'.repeat(200) })).status, 204);
+  assert.equal((await correct({ revision: 0, amountMinor: '0' })).status, 400);
+  assert.equal((await correct({ revision: 0, date: '1899-12-31' })).status, 400);
+  assert.equal((await correct({ revision: 0, date: today.plus({ days: 1 }).toISODate() })).status, 400);
+  assert.equal((await correct({ revision: 0, amountMinor: '3000000', currency: 'USD' })).status, 400);
+  assert.equal((await edit({ category: 'compras', note: '  Recibo de prueba  ' })).status, 204);
+  const annotated = await get(path);
+  assert.deepEqual([annotated.category, annotated.note, annotated.correction_revision], ['compras', 'Recibo de prueba', 0]);
+
+  const manual = await request('movements', 'POST', {
+    requestId: randomUUID(), amountMinor: '2500000', date, direction: 'expense', currency: 'COP', category: 'otros',
+  }, owner);
+  assert.equal(manual.status, 201);
+  const manualPath = 'movements/' + (await manual.json()).id;
+  assert.equal((await get(path)).matches.length, 1);
+  assert.equal((await request(manualPath + '/correction', 'PATCH', { revision: 0, amountMinor: '1' }, owner)).status, 404);
+
+  const first = { revision: 0, amountMinor: '3000000' };
+  const retries = await Promise.all([correct(first), correct(first)]);
+  assert.deepEqual(retries.map(response => response.status), [204, 204]);
+  assert.equal((await get(path)).matches.length, 0);
+  assert.equal((await request(manualPath, 'DELETE', undefined, owner)).status, 204);
+  assert.equal((await correct({ revision: 0, date: previous })).status, 409);
+  assert.equal((await correct({ revision: 1, date: previous })).status, 204);
+  const competing = ['3100000', '3200000'];
+  const results = await Promise.all(competing.map(amountMinor => correct({ revision: 2, amountMinor })));
+  assert.deepEqual(results.map(response => response.status).sort(), [204, 409]);
+  const amount = competing[results.findIndex(response => response.status === 204)];
+  assert.equal((await edit({ note: null })).status, 204);
+
+  const detail = await get(path);
+  assert.deepEqual(
+    [detail.amount_minor, detail.transaction_date, detail.category, detail.note, detail.correction_revision,
+      detail.original_amount_minor, detail.original_transaction_date],
+    [amount, previous, 'compras', null, 3, '2500000', date],
+  );
+  assert.equal((await get('movements?' + period(date))).items.length, 0);
+  assert.equal((await get('movements?' + period(previous) + '&category=compras')).items[0].id, movement.id);
+  assert.equal((await get('analytics?' + period(date))).expenseMinor, '0');
+  assert.equal((await get('analytics?' + period(previous))).expenseMinor, amount);
+  const registered = await get('notices?status=registered&category=compras&' + period(previous));
+  assert.deepEqual(registered.items.map((item: { id: string; amount_minor: string }) => [item.id, item.amount_minor]), [[notice.id, amount]]);
+  assert.equal((await get('notices/' + notice.id)).transaction_date, previous);
+  assert.equal((await get('summary?' + period(previous) + '&category=compras')).totals[0].amount_minor, amount);
+  const chat = await request('chat/sessions', 'POST', undefined, owner);
+  const turn = await request('chat/sessions/' + (await chat.json()).id + '/messages', 'POST',
+    { message: '¿Cuánto gasté en compras el ' + previous + ' en COP?' }, owner);
+  assert.ok((await turn.json()).answer.includes(amount === '3100000' ? 'COP 31.000,00' : 'COP 32.000,00'));
+
+  assert.equal((await correct({ revision: 3, amountMinor: null, date: null })).status, 204);
+  const { items } = await get(path + '/corrections');
+  assert.deepEqual(items.map((item: { revision: number }) => item.revision), [4, 3, 2, 1]);
+  assert.ok(Date.parse(items[0].corrected_at) > 0);
+  assert.deepEqual(
+    [items[0].previous_amount_minor, items[0].amount_minor, items[0].previous_transaction_date, items[0].transaction_date],
+    [amount, '2500000', previous, date],
+  );
+  assert.deepEqual((await db.query('SELECT amount_minor::text, transaction_date::text, category FROM transactions WHERE id=$1', [movement.id])).rows,
+    [{ amount_minor: '2500000', transaction_date: date, category: 'alimentacion' }]);
+
+  for (let revision = 4; revision < 27; revision++) {
+    assert.equal((await correct({ revision, amountMinor: String(2500001 + revision) })).status, 204);
+  }
+  const page = await get(path + '/corrections');
+  assert.equal(page.items.length, 25);
+  assert.equal(page.nextBeforeRevision, 3);
+  const older = await get(path + '/corrections?beforeRevision=' + page.nextBeforeRevision);
+  assert.deepEqual(older.items.map((item: { revision: number }) => item.revision), [2, 1]);
+  assert.equal(older.nextBeforeRevision, null);
 });
 
 test('Google móvil verifica un token firmado y exige el verificador del dispositivo', { skip: !connection }, async t => {

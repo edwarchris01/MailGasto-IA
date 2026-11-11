@@ -12,6 +12,10 @@ const movementSources = {'email': 'Correo', 'manual': 'Manual'};
 
 typedef FinanceRange = ({String from, String to, String currency});
 typedef MovementPage = ({List<Movement> items, int page, bool hasMore});
+typedef CorrectionPage = ({
+  List<MovementCorrection> items,
+  int? nextBeforeRevision,
+});
 typedef MovementFilter = ({
   String? from,
   String? to,
@@ -78,6 +82,9 @@ class Movement {
       method = row['payment_method'] as String?,
       description = row['description'] as String?,
       provider = row['provider'] as String?,
+      emailDetails = row['correction_revision'] == null
+          ? null
+          : EmailMovementDetails.fromJson(row),
       matches = ((row['matches'] as List?) ?? const [])
           .cast<Json>()
           .map(Movement.fromJson)
@@ -87,6 +94,7 @@ class Movement {
   final String? method, description, provider;
   final bool income;
   final BigInt minor;
+  final EmailMovementDetails? emailDetails;
   final List<Movement> matches;
 
   bool get manual => source == 'manual';
@@ -94,6 +102,31 @@ class Movement {
   String get title =>
       description ?? '$kind ${manual ? 'manual' : 'por correo'}';
   String get signedAmount => '${income ? '+' : '−'} ${money(minor, currency)}';
+}
+
+class EmailMovementDetails {
+  EmailMovementDetails.fromJson(Json row)
+    : note = row['note'] as String?,
+      originalMinor = BigInt.parse(row['original_amount_minor'] as String),
+      originalDate = row['original_transaction_date'] as String,
+      revision = row['correction_revision'] as int;
+
+  final String? note;
+  final BigInt originalMinor;
+  final String originalDate;
+  final int revision;
+}
+
+class MovementCorrection {
+  MovementCorrection.fromJson(Json row)
+    : correctedAt = row['corrected_at'] as String,
+      previousMinor = BigInt.parse(row['previous_amount_minor'] as String),
+      minor = BigInt.parse(row['amount_minor'] as String),
+      previousDate = row['previous_transaction_date'] as String,
+      date = row['transaction_date'] as String;
+
+  final String correctedAt, previousDate, date;
+  final BigInt previousMinor, minor;
 }
 
 class Bucket {
@@ -183,6 +216,26 @@ class FinanceRepository {
 
   Future<void> edit(String id, Json data) =>
       api.request('movements/$id', method: 'PATCH', body: data);
+
+  Future<void> editEmailDetails(String id, Json data) =>
+      api.request('movements/$id/email-details', method: 'PATCH', body: data);
+
+  Future<void> correct(String id, Json data) =>
+      api.request('movements/$id/correction', method: 'PATCH', body: data);
+
+  Future<CorrectionPage> corrections(String id, {int? beforeRevision}) async {
+    final result = await api.object(
+      'movements/$id/corrections',
+      query: {'beforeRevision': ?beforeRevision},
+    );
+    return (
+      items: (result['items'] as List)
+          .cast<Json>()
+          .map(MovementCorrection.fromJson)
+          .toList(),
+      nextBeforeRevision: result['nextBeforeRevision'] as int?,
+    );
+  }
 
   Future<void> remove(String id) =>
       api.request('movements/$id', method: 'DELETE');

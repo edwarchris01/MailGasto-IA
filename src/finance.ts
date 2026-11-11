@@ -1,5 +1,6 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { DateTime } from 'luxon';
+import type { PoolClient } from 'pg';
 import { z } from 'zod';
 import { Database } from './db.js';
 import { category, day, timezone } from './extraction.js';
@@ -7,6 +8,9 @@ import { currencies, directions } from './mail-rules.js';
 
 const direction = z.enum(directions);
 const currency = z.enum(currencies);
+const movementAmount = z.string().regex(/^[1-9]\d{0,17}$/);
+const maxRevision = 2_147_483_647;
+const correctionPageSize = 25;
 export const financeFilters = z.object({
   from: day.optional(), to: day.optional(), currency: currency.optional(), category: category.optional(),
 });
@@ -18,13 +22,26 @@ export const movementFilters = financeFilters.extend({
 });
 export const analyticsInput = financeFilters.extend({ from: day, to: day, currency });
 export const manualInput = z.object({
-  amountMinor: z.string().regex(/^[1-9]\d{0,17}$/),
+  amountMinor: movementAmount,
   currency, date: day, direction,
   category: category.optional(),
   paymentMethod: z.string().trim().min(1).max(60).optional(),
   description: z.string().trim().min(1).max(200).optional(),
 }).refine(data => data.direction === 'income' ? !data.category || data.category === 'ingresos' :
   data.category != null && data.category !== 'ingresos');
+export const emailDetailsInput = z.strictObject({
+  category: category.optional(),
+  note: z.string().trim().refine(value => value.length <= 400 && [...value].length <= 200 && !value.includes('\0'))
+    .transform(value => value || null).nullable().optional(),
+}).refine(data => data.category !== undefined || data.note !== undefined);
+export const correctionInput = z.strictObject({
+  revision: z.number().int().min(0).max(maxRevision),
+  amountMinor: movementAmount.nullable().optional(),
+  date: day.nullable().optional(),
+}).refine(data => data.amountMinor !== undefined || data.date !== undefined);
+export const correctionsQuery = z.object({
+  beforeRevision: z.coerce.number().int().min(1).max(maxRevision).optional(),
+});
 
 type Filters = z.infer<typeof financeFilters>;
 type Manual = z.infer<typeof manualInput>;
@@ -34,7 +51,11 @@ type AmountRow = {
 };
 type Movement = {
   id: string; source: string; amount_minor: string; currency: string; transaction_date: string; direction: string;
+  note: string | null; original_amount_minor: string | null; original_transaction_date: string | null;
+  correction_revision: number | null;
 };
+type EmailOriginal = { amount_minor: string; transaction_date: string; category: string; direction: string };
+type EmailAdjustment = { amount_minor: string | null; transaction_date: string | null; revision: number };
 const fields = 'id,source,notice_id,provider,amount_minor::text, currency, transaction_date::text, payment_method, description, category, direction';
 const where = 'account_id=$1 AND ($2::date IS NULL OR transaction_date >= $2) ' +
   'AND ($3::date IS NULL OR transaction_date <= $3) AND ($4::text IS NULL OR currency=$4) ' +
@@ -58,6 +79,16 @@ export function manualValues(data: Manual) {
     data.direction === 'income' ? 'ingresos' : data.category, data.direction];
 }
 
+async function lockEmailMovement(client: PoolClient, account: string, id: string) {
+  const { rows: [original] } = await client.query<EmailOriginal>(
+    'SELECT t.amount_minor::text,t.transaction_date::text,t.category,t.direction FROM transactions t ' +
+    'JOIN notices n ON n.id=t.notice_id JOIN mailboxes m ON m.id=n.mailbox_id ' +
+    "WHERE m.account_id=$1 AND t.id=$2 AND n.status='registered' FOR UPDATE OF t", [account, id],
+  );
+  if (!original) throw new NotFoundException('Movimiento de correo no encontrado.');
+  return original;
+}
+
 @Injectable()
 export class Finance {
   constructor(@Inject(Database) private readonly db: Database) {}
@@ -75,7 +106,8 @@ export class Finance {
 
   async detail(account: string, id: string) {
     const { rows: [movement] } = await this.db.query<Movement>(
-      'SELECT ' + fields + ' FROM confirmed_movements WHERE account_id=$1 AND id=$2', [account, id],
+      'SELECT ' + fields + ',note,original_amount_minor::text,original_transaction_date::text,correction_revision ' +
+      'FROM confirmed_movements WHERE account_id=$1 AND id=$2', [account, id],
     );
     if (!movement) throw new NotFoundException('Movimiento no encontrado.');
     const { rows: matches } = await this.db.query(
@@ -83,7 +115,74 @@ export class Finance {
       'AND currency=$4 AND transaction_date=$5 AND direction=$6 ORDER BY id LIMIT 25',
       [account, movement.source, movement.amount_minor, movement.currency, movement.transaction_date, movement.direction],
     );
-    return { ...movement, matches };
+    const { note, original_amount_minor, original_transaction_date, correction_revision, ...details } = movement;
+    return movement.source === 'email'
+      ? { ...details, note, original_amount_minor, original_transaction_date, correction_revision, matches }
+      : { ...details, matches };
+  }
+
+  async editEmailDetails(account: string, id: string, data: z.infer<typeof emailDetailsInput>) {
+    await this.db.transaction(async client => {
+      const original = await lockEmailMovement(client, account, id);
+      if (data.category !== undefined && (original.direction === 'income') !== (data.category === 'ingresos')) {
+        throw new BadRequestException('Selecciona una categoría válida para este movimiento.');
+      }
+      await client.query(
+        'INSERT INTO email_movement_adjustments (movement_id,category,note) VALUES ($1,$2,$3) ' +
+        'ON CONFLICT (movement_id) DO UPDATE SET ' +
+        'category=CASE WHEN $4 THEN excluded.category ELSE email_movement_adjustments.category END,' +
+        'note=CASE WHEN $5 THEN excluded.note ELSE email_movement_adjustments.note END',
+        [id, data.category === original.category ? null : data.category ?? null, data.note ?? null,
+          data.category !== undefined, data.note !== undefined],
+      );
+    });
+  }
+
+  async correctEmailMovement(account: string, id: string, data: z.infer<typeof correctionInput>) {
+    if (data.date && (data.date < '1900-01-01' || data.date > iso(DateTime.now().setZone(timezone)))) {
+      throw new BadRequestException('Selecciona una fecha entre 1900 y hoy.');
+    }
+    await this.db.transaction(async client => {
+      const original = await lockEmailMovement(client, account, id);
+      const { rows: [adjustment] } = await client.query<EmailAdjustment>(
+        'SELECT amount_minor::text,transaction_date::text,revision FROM email_movement_adjustments WHERE movement_id=$1', [id],
+      );
+      const amount = adjustment?.amount_minor ?? original.amount_minor;
+      const date = adjustment?.transaction_date ?? original.transaction_date;
+      const nextAmount = data.amountMinor === undefined ? amount : data.amountMinor ?? original.amount_minor;
+      const nextDate = data.date === undefined ? date : data.date ?? original.transaction_date;
+      if (nextAmount === amount && nextDate === date) return;
+
+      const revision = adjustment?.revision ?? 0;
+      if (data.revision !== revision) {
+        throw new ConflictException('El movimiento cambió en otra sesión. Recarga los datos para continuar.');
+      }
+      await client.query(
+        'INSERT INTO email_movement_adjustments (movement_id,amount_minor,transaction_date,revision) VALUES ($1,$2,$3,$4) ' +
+        'ON CONFLICT (movement_id) DO UPDATE SET ' +
+        '(amount_minor,transaction_date,revision)=(excluded.amount_minor,excluded.transaction_date,excluded.revision)',
+        [id, nextAmount === original.amount_minor ? null : nextAmount,
+          nextDate === original.transaction_date ? null : nextDate, revision + 1],
+      );
+      await client.query(
+        'INSERT INTO email_movement_corrections ' +
+        '(movement_id,revision,previous_amount_minor,amount_minor,previous_transaction_date,transaction_date) ' +
+        'VALUES ($1,$2,$3,$4,$5,$6)', [id, revision + 1, amount, nextAmount, date, nextDate],
+      );
+    });
+  }
+
+  async emailCorrections(account: string, id: string, beforeRevision?: number) {
+    const { rows } = await this.db.query<{ revision: number | null }>(
+      'SELECT c.revision,c.corrected_at,c.previous_amount_minor::text,c.amount_minor::text,' +
+      'c.previous_transaction_date::text,c.transaction_date::text FROM confirmed_movements m ' +
+      'LEFT JOIN email_movement_corrections c ON c.movement_id=m.id AND ($3::int IS NULL OR c.revision<$3) ' +
+      "WHERE m.account_id=$1 AND m.id=$2 AND m.source='email' ORDER BY c.revision DESC LIMIT $4",
+      [account, id, beforeRevision ?? null, correctionPageSize + 1],
+    );
+    if (!rows.length) throw new NotFoundException('Movimiento de correo no encontrado.');
+    const items = rows[0].revision === null ? [] : rows.slice(0, correctionPageSize);
+    return { items, nextBeforeRevision: rows.length > correctionPageSize ? items.at(-1)!.revision : null };
   }
 
   async add(account: string, requestId: string, data: Manual) {
