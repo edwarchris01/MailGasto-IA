@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { performance } from 'node:perf_hooks';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
+import { DateTime } from 'luxon';
 import { Agent } from '../src/agent.js';
 import { readConfig } from '../src/config.js';
 import { Database } from '../src/db.js';
@@ -18,8 +19,9 @@ const connection = process.env.MAILGASTO_TEST_DATABASE_URL;
 const origin = 'http://localhost:3105';
 const ingestKey = 'test-ingest-key-for-local-integration-only';
 const password = 'synthetic-test-password';
-const rawMessage = (subject: string, body: string, sender = 'alertas@nequi.example') => Buffer.from(
+const rawMessage = (subject: string, body: string, sender = 'alertas@nequi.example', authenticated = false) => Buffer.from(
   'From: <' + sender + '>\r\nTo: owner@example.test\r\nSubject: ' + subject +
+  (authenticated ? '\r\nAuthentication-Results: mx.google.com; dmarc=pass header.from=' + sender.split('@')[1] : '') +
   '\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n' + body,
 ).toString('base64url');
 
@@ -275,6 +277,19 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
   let revoked = false;
   let cursor = '';
   let messageIds = ['direct'];
+  const bankAddress = 'alertasynotificaciones@an.notificacionesbancolombia.com';
+  const month = DateTime.now().setZone('America/Bogota').startOf('month');
+  const operationDay = month.toFormat('dd/MM/yyyy');
+  const earlier = month.plus({ milliseconds: 2 });
+  const deposits = 'Bancolombia: Recibiste un pago de nómina por $1,123,450.01 en el producto *7321, el ' + operationDay + ' a las 10:08.';
+  const historical: Record<string, string> = {
+    'past-qr': rawMessage('Alertas y Notificaciones', 'Bancolombia: Pagaste $35,100.00 por QR el ' + operationDay + ' a las 11:21.', bankAddress, true),
+    'past-payroll': rawMessage('Alertas y Notificaciones', deposits, bankAddress, true),
+    'past-copy': rawMessage('Alertas y Notificaciones', deposits, bankAddress, true),
+    'past-personal': rawMessage('Feliz cumpleaños', 'Hola', shopSender),
+    'outside-month': rawMessage('Alertas y Notificaciones', deposits, bankAddress, true),
+  };
+  const scanPages: (string | null)[] = [];
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
     if (url === 'https://oauth2.googleapis.com/token') {
@@ -287,10 +302,19 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       cursor = new URL(url).searchParams.get('startHistoryId')!;
       return Response.json({ historyId: '101', history: [{ messagesAdded: messageIds.map(id => ({ message: { id } })) }] });
     }
+    if (url.startsWith('https://gmail.googleapis.com/') && new URL(url).pathname.endsWith('/messages')) {
+      const params = new URL(url).searchParams;
+      const page = params.get('pageToken');
+      scanPages.push(page);
+      assert.match(params.get('q') ?? '', new RegExp('^after:' + (Math.floor(month.toSeconds()) - 1) + ' before:\\d+ -in:sent -in:drafts$'));
+      return Response.json(page ? { messages: ['past-copy', 'past-personal', 'outside-month'].map(id => ({ id })) } :
+        { messages: ['direct', 'past-qr', 'past-payroll'].map(id => ({ id })), nextPageToken: 'second' });
+    }
     if (url.includes('gmail.googleapis.com') && url.includes('/messages/')) {
       const id = new URL(url).pathname.split('/').at(-1)!;
-      const raw = id === 'personal' ? rawMessage('Feliz cumpleaños', 'Hola', otherEmail) : rawMessage('Aviso de pago', bank, bankSender);
-      return Response.json({ id, raw, internalDate: String(Date.now() + 50), labelIds: ['INBOX'] });
+      const raw = historical[id] ?? (id === 'personal' ? rawMessage('Feliz cumpleaños', 'Hola', otherEmail) : rawMessage('Aviso de pago', bank, bankSender));
+      const internalDate = id === 'outside-month' ? month.toMillis() - 1000 : historical[id] ? earlier.toMillis() : Date.now() + 50;
+      return Response.json({ id, raw, internalDate: String(internalDate), labelIds: ['INBOX'] });
     }
     return fetchReal(input, init);
   }) as typeof fetch;
@@ -339,6 +363,46 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
     assert.equal(ignored.status, 'ignored');
     assert.equal((await (await post(ignored)).json()).outcome, 'ignored');
     assert.equal((await (await request('notices', 'GET', undefined, other)).json()).items.length, 1);
+    await t.test('reprocesses before linkage, preserves the confirmed notice and flags a second copy', async () => {
+      const path = 'mailboxes/' + linked + '/reprocess';
+      assert.equal((await request(path, 'POST')).status, 401);
+      assert.equal((await request(path, 'POST', undefined, owner)).status, 404);
+      assert.equal((await request('mailboxes/' + linked + '/openai', 'PATCH', { enabled: true }, other)).status, 503);
+      const existing = await db.query(
+        "INSERT INTO notices (mailbox_id,message_id,received_at,provider,forwarded,status,reason) " +
+        "VALUES ($1,'past-qr',$2,'bancolombia',false,'error','extractor_unavailable') RETURNING id", [linked, earlier.toJSDate()],
+      );
+      const messagesBefore = (await db.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count;
+      const launch = await request(path, 'POST', undefined, other);
+      assert.equal(launch.status, 202);
+      const activeRun = await launch.json();
+      assert.deepEqual(await (await request(path, 'POST', undefined, other)).json(), activeRun);
+      assert.equal(await gmail.scanReprocessPage(), true);
+      assert.equal(await gmail.dispatchOne(), true);
+      assert.equal(await gmail.dispatchOne(), true);
+      assert.equal(await gmail.scanReprocessPage(), true);
+      for (let index = 0; index < 3; index++) assert.equal(await gmail.dispatchOne(), true);
+      assert.equal(await gmail.dispatchOne(), false);
+      assert.equal(await gmail.scanReprocessPage(), false);
+      assert.deepEqual(scanPages, [null, 'second']);
+      const { reprocess } = (await (await request('mailboxes', 'GET', undefined, other)).json())[0];
+      assert.ok(reprocess.finishedAt);
+      assert.equal(reprocess.failure, null);
+      assert.deepEqual(reprocess.summary, { registered: 2, pending: 1, ignored: 1, skipped: 2 });
+      const notices = await db.query('SELECT n.id,message_id,status,reason,amount_minor,payment_method,transaction_time,direction ' +
+        'FROM notices n LEFT JOIN transactions t ON t.notice_id=n.id WHERE n.mailbox_id=$1 ORDER BY message_id', [linked]);
+      assert.deepEqual(notices.rows.map(row => [row.message_id, row.status, row.amount_minor, row.payment_method, row.direction]), [
+        ['direct', 'registered', '2500000', null, 'expense'],
+        ['past-copy', 'pending', null, null, null],
+        ['past-payroll', 'registered', '112345001', null, 'income'],
+        ['past-qr', 'registered', '3510000', 'QR', 'expense'],
+      ]);
+      assert.equal(notices.rows[0].id, list.items[0].id);
+      assert.equal(notices.rows[1].reason, 'possible_duplicate');
+      assert.equal(notices.rows[2].transaction_time, '10:08');
+      assert.equal(notices.rows[3].id, existing.rows[0].id);
+      assert.equal((await db.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, messagesBefore);
+    });
     const tokenRow = await db.query('SELECT secret FROM mailboxes WHERE id=$1', [linked]);
     assert.notEqual(tokenRow.rows[0].secret, 'refresh');
     await poll('in-flight');
@@ -366,7 +430,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       { state: 'disconnected', providerRevoked: true });
     assert.equal((await (await post(renewed)).json()).outcome, 'discarded');
     assert.equal((await db.query('SELECT 1 FROM gmail_deliveries WHERE mailbox_id=$1 AND completed_at IS NULL', [linked])).rowCount, 0);
-    assert.equal((await (await request('notices', 'GET', undefined, other)).json()).items.length, 1);
+    assert.equal((await (await request('notices', 'GET', undefined, other)).json()).items.length, 4);
 
     const mobileOrigin = 'https://mailgasto.example.test';
     const fingerprint = Array(32).fill('AA').join(':');

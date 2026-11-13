@@ -1,14 +1,18 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import { DateTime } from 'luxon';
 import { simpleParser } from 'mailparser';
 import { CONFIG, Config, decrypt, encrypt, hash, token } from './config.js';
 import { Database } from './db.js';
-import { messageIdPattern } from './gmail-results.js';
+import { timezone } from './extraction.js';
+import { GmailExtraction } from './gmail-extraction.js';
+import { finishGmailDelivery, GmailResults, messageIdPattern } from './gmail-results.js';
 
 const gmailScope = 'https://www.googleapis.com/auth/gmail.readonly';
 const gmailRoot = 'https://gmail.googleapis.com/gmail/v1/users/me/';
 const tokenUrl = 'https://oauth2.googleapis.com/token';
 const maxRawSize = 1_500_000;
+const maxReprocessAttempts = 5;
 
 class GoogleError extends Error {
   constructor(readonly status: number, readonly code?: string) {
@@ -27,26 +31,77 @@ type Profile = { emailAddress: string; historyId: string };
 type RawMessage = { id: string; raw: string; internalDate: string; labelIds?: string[] };
 type Tokens = { access_token: string; refresh_token?: string; scope?: string };
 type History = { historyId: string; nextPageToken?: string; history?: { messagesAdded?: { message: { id: string } }[] }[] };
+type Messages = { messages?: { id: string }[]; nextPageToken?: string };
 type OAuthState = { verifier: string; expected_mailbox: string | null };
 type Mailbox = {
   id: string; account_id: string; email: string; source: 'n8n' | 'oauth';
   state: 'active' | 'reconnect' | 'disconnected'; secret: string | null;
   history_id: string | null; linked_at: Date; last_synced_at: Date | null; sync_lease: string | null;
   generation: string;
+  openai_consented_at: Date | null;
 };
-type Job = Mailbox & { delivery_id: string; message_id: string; attempts: number };
+type Job = Mailbox & { delivery_id: string; message_id: string; attempts: number; reprocess_id: string | null;
+  from_at: Date | null; to_at: Date | null };
+type Scan = Mailbox & { run_id: string; from_at: Date; to_at: Date; page_token: string | null; scan_attempts: number };
 const isRevoked = (error: unknown) => error instanceof GoogleError && (error.code === 'invalid_grant' || error.status === 401);
+const messageIds = (ids: string[]) => [...new Set(ids.filter(id => typeof id === 'string' && messageIdPattern.test(id)))];
 
 @Injectable()
 export class Gmail {
-  constructor(@Inject(Database) private readonly db: Database, @Inject(CONFIG) private readonly config: Config) {}
+  constructor(
+    @Inject(Database) private readonly db: Database, @Inject(CONFIG) private readonly config: Config,
+    @Inject(GmailExtraction) private readonly extraction: GmailExtraction,
+    @Inject(GmailResults) private readonly results: GmailResults,
+  ) {}
 
   async list(accountId: string) {
     const { rows } = await this.db.query(
-      'SELECT id,email,source,state,linked_at,last_synced_at FROM mailboxes WHERE account_id=$1 ORDER BY linked_at DESC',
-      [accountId],
+      'SELECT m.id,m.email,m.source,m.state,m.linked_at,m.last_synced_at,m.openai_consented_at IS NOT NULL AS openai_enabled,' +
+      "($2::boolean AND m.source='oauth') AS openai_available," +
+      'CASE WHEN r.id IS NOT NULL THEN jsonb_build_object(' +
+      "'from',r.from_at,'to',r.to_at,'finishedAt',r.finished_at,'failure',r.failure,'summary',r.summary) END AS reprocess " +
+      'FROM mailboxes m LEFT JOIN LATERAL (SELECT * FROM gmail_reprocess_runs ' +
+      'WHERE mailbox_id=m.id ORDER BY started_at DESC LIMIT 1) r ON true ' +
+      'WHERE m.account_id=$1 ORDER BY m.linked_at DESC',
+      [accountId, Boolean(this.config.OPENAI_API_KEY)],
     );
     return rows;
+  }
+
+  async setOpenAi(accountId: string, mailboxId: string, enabled: boolean) {
+    if (enabled && !this.config.OPENAI_API_KEY) {
+      throw new ServiceUnavailableException('OpenAI aún no está configurado en el servidor.');
+    }
+    const changed = await this.db.query(
+      "UPDATE mailboxes SET openai_consented_at=CASE WHEN $3 THEN COALESCE(openai_consented_at,now()) END " +
+      "WHERE id=$1 AND account_id=$2 AND source='oauth' AND (NOT $3 OR state='active')",
+      [mailboxId, accountId, enabled],
+    );
+    if (!changed.rowCount) throw new NotFoundException('Buzón de Gmail activo no encontrado.');
+  }
+
+  async reprocessMonth(accountId: string, mailboxId: string) {
+    this.requireOAuth();
+    return this.db.transaction(async client => {
+      const { rows: [mailbox] } = await client.query<Pick<Mailbox, 'source' | 'state'>>(
+        'SELECT source,state FROM mailboxes WHERE id=$1 AND account_id=$2 FOR UPDATE', [mailboxId, accountId],
+      );
+      if (!mailbox) throw new NotFoundException('Buzón no encontrado.');
+      if (mailbox.source !== 'oauth' || mailbox.state !== 'active') {
+        throw new ConflictException('Vincula el buzón con Google para revisar correos anteriores.');
+      }
+      const { rows: [running] } = await client.query<{ id: string }>(
+        'SELECT id FROM gmail_reprocess_runs WHERE mailbox_id=$1 AND finished_at IS NULL', [mailboxId],
+      );
+      if (running) return running;
+      const now = DateTime.now().setZone(timezone);
+      const from = now.startOf('month');
+      const { rows: [run] } = await client.query<{ id: string }>(
+        'INSERT INTO gmail_reprocess_runs (mailbox_id,from_at,to_at) VALUES ($1,$2,$3) RETURNING id',
+        [mailboxId, from.toJSDate(), now.toMillis() === from.toMillis() ? now.plus({ milliseconds: 1 }).toJSDate() : now.toJSDate()],
+      );
+      return run!;
+    });
   }
 
   async connectLegacy(accountId: string, accountEmail: string) {
@@ -190,10 +245,14 @@ export class Gmail {
       const row = result.rows[0];
       if (!row) throw new NotFoundException('Buzón no encontrado.');
       await client.query(
-        "UPDATE mailboxes SET state='disconnected',secret=NULL,sync_lease=NULL,generation=gen_random_uuid() WHERE id=$1", [id],
+        "UPDATE mailboxes SET state='disconnected',secret=NULL,sync_lease=NULL,openai_consented_at=NULL,generation=gen_random_uuid() WHERE id=$1", [id],
       );
       await client.query('UPDATE gmail_deliveries SET completed_at=now(),attempt_id=NULL ' +
         'WHERE mailbox_id=$1 AND completed_at IS NULL', [id]);
+      await client.query(
+        "UPDATE gmail_reprocess_runs SET failure='mailbox_unavailable',scan_finished_at=now(),scan_lease=NULL " +
+        'WHERE mailbox_id=$1 AND finished_at IS NULL', [id],
+      );
       await client.query(
         "UPDATE notices SET status='error',reason='mailbox_disconnected',payload=NULL,lease=NULL,completed_at=now() " +
         "WHERE mailbox_id=$1 AND status='processing'", [id],
@@ -211,7 +270,7 @@ export class Gmail {
   }
 
   async pollOne() {
-    if (!this.config.GOOGLE_CLIENT_ID || !this.config.GOOGLE_CLIENT_SECRET || !this.config.N8N_GMAIL_WEBHOOK_URL) return false;
+    if (!this.config.GOOGLE_CLIENT_ID || !this.config.GOOGLE_CLIENT_SECRET) return false;
     const lease = randomUUID();
     const { rows: [mailbox] } = await this.db.query<Mailbox>(
       "UPDATE mailboxes SET sync_due_at=now()+interval '2 minutes',sync_lease=$1 " +
@@ -262,7 +321,7 @@ export class Gmail {
     do {
       const params = new URLSearchParams({ q: 'after:' + (Math.floor(boundary / 1000) - 1), maxResults: '100' });
       if (pageToken) params.set('pageToken', pageToken);
-      const result = await this.request<{ messages?: { id: string }[]; nextPageToken?: string }>('messages?' + params, access);
+      const result = await this.request<Messages>('messages?' + params, access);
       await this.enqueue(mailbox, (result.messages ?? []).map(item => item.id));
       pageToken = result.nextPageToken ?? '';
     } while (pageToken);
@@ -270,7 +329,7 @@ export class Gmail {
   }
 
   private async enqueue(mailbox: Mailbox, ids: string[]) {
-    const distinct = [...new Set(ids.filter(id => typeof id === 'string' && messageIdPattern.test(id)))];
+    const distinct = messageIds(ids);
     if (!distinct.length) return;
     await this.db.transaction(async client => {
       const active = await client.query("SELECT 1 FROM mailboxes WHERE id=$1 AND generation=$2 AND sync_lease=$3 AND state='active' FOR UPDATE",
@@ -285,55 +344,158 @@ export class Gmail {
     });
   }
 
+  async scanReprocessPage() {
+    await this.db.query(
+      "UPDATE gmail_reprocess_runs r SET failure='mailbox_unavailable',scan_finished_at=now(),scan_lease=NULL " +
+      "FROM mailboxes m WHERE m.id=r.mailbox_id AND m.state<>'active' AND r.finished_at IS NULL AND r.failure IS NULL",
+    );
+    await this.db.query(
+      'WITH finished AS (UPDATE gmail_reprocess_runs r SET finished_at=clock_timestamp(),summary=COALESCE((' +
+      'SELECT jsonb_object_agg(outcome,total) FROM (SELECT outcome,count(*)::int AS total FROM gmail_reprocess_results ' +
+      "WHERE run_id=r.id GROUP BY outcome) counts),'{}'::jsonb) " +
+      'WHERE r.finished_at IS NULL AND r.scan_finished_at IS NOT NULL AND ' +
+      "(r.failure='mailbox_unavailable' OR NOT EXISTS (SELECT 1 FROM gmail_deliveries d WHERE d.reprocess_id=r.id AND d.completed_at IS NULL)) " +
+      'RETURNING r.id) DELETE FROM gmail_reprocess_results x USING finished f WHERE x.run_id=f.id',
+    );
+    if (!this.config.GOOGLE_CLIENT_ID || !this.config.GOOGLE_CLIENT_SECRET) return false;
+    const lease = randomUUID();
+    const { rows: [scan] } = await this.db.query<Scan>(
+      'WITH claimed AS (UPDATE gmail_reprocess_runs SET scan_lease=$1,scan_attempts=scan_attempts+1,' +
+      "scan_due_at=now()+interval '1 minute' WHERE id=(" +
+      'SELECT r.id FROM gmail_reprocess_runs r JOIN mailboxes m ON m.id=r.mailbox_id ' +
+      "WHERE r.scan_finished_at IS NULL AND r.scan_due_at<=now() AND m.state='active' " +
+      'ORDER BY r.scan_due_at FOR UPDATE OF r SKIP LOCKED LIMIT 1) RETURNING *) ' +
+      'SELECT m.*,r.id AS run_id,r.from_at,r.to_at,r.page_token,r.scan_attempts FROM claimed r JOIN mailboxes m ON m.id=r.mailbox_id',
+      [lease],
+    );
+    if (!scan) return false;
+    try {
+      const access = await this.accessToken(scan);
+      const from = Math.floor(scan.from_at.getTime() / 1000) - 1;
+      const to = Math.ceil(scan.to_at.getTime() / 1000);
+      const query = new URLSearchParams({ q: 'after:' + from + ' before:' + to + ' -in:sent -in:drafts', maxResults: '100' });
+      if (scan.page_token) query.set('pageToken', scan.page_token);
+      const page = await this.request<Messages>('messages?' + query, access);
+      await this.enqueueReprocessPage(scan, lease, messageIds((page.messages ?? []).map(message => message.id)), page.nextPageToken);
+    } catch (error) {
+      const revoked = isRevoked(error);
+      if (revoked) {
+        await this.db.query("UPDATE mailboxes SET state='reconnect',sync_lease=NULL WHERE id=$1 AND generation=$2 AND state='active'",
+          [scan.id, scan.generation]);
+      }
+      const failure = revoked ? 'mailbox_unavailable' : scan.scan_attempts >= maxReprocessAttempts ? 'gmail_list_failed' : null;
+      await this.db.query(
+        "UPDATE gmail_reprocess_runs SET scan_lease=NULL,scan_due_at=now()+interval '30 seconds'," +
+        'failure=$3,scan_finished_at=CASE WHEN $3::text IS NOT NULL THEN now() END WHERE id=$1 AND scan_lease=$2',
+        [scan.run_id, lease, failure],
+      );
+    }
+    return true;
+  }
+
+  private async enqueueReprocessPage(scan: Scan, lease: string, ids: string[], next?: string) {
+    await this.db.transaction(async client => {
+      const active = await client.query(
+        "SELECT 1 FROM mailboxes WHERE id=$1 AND generation=$2 AND state='active' FOR UPDATE", [scan.id, scan.generation],
+      );
+      if (!active.rowCount) return;
+      const saved = await client.query(
+        'UPDATE gmail_reprocess_runs SET page_token=$3,scan_lease=NULL,scan_attempts=0,scan_due_at=now(),' +
+        'scan_finished_at=CASE WHEN $3::text IS NULL THEN now() END WHERE id=$1 AND scan_lease=$2 AND finished_at IS NULL',
+        [scan.run_id, lease, next ?? null],
+      );
+      if (!saved.rowCount || !ids.length) return;
+      await client.query(
+        "WITH candidates AS (SELECT ids.message_id, (n.status NOT IN ('pending','error') OR t.id IS NOT NULL OR d.received_at>=$5) AS skip " +
+        'FROM unnest($4::text[]) AS ids(message_id) LEFT JOIN notices n ON n.mailbox_id=$1 AND n.message_id=ids.message_id ' +
+        'LEFT JOIN transactions t ON t.notice_id=n.id ' +
+        'LEFT JOIN gmail_deliveries d ON d.mailbox_id=$1 AND d.generation=$2 AND d.message_id=ids.message_id ' +
+        'WHERE NOT EXISTS (SELECT 1 FROM gmail_reprocess_results r WHERE r.run_id=$3 AND r.message_id=ids.message_id)),' +
+        "skipped AS (INSERT INTO gmail_reprocess_results (run_id,message_id,outcome) SELECT $3,message_id,'skipped' " +
+        'FROM candidates WHERE skip ON CONFLICT DO NOTHING) ' +
+        'INSERT INTO gmail_deliveries (mailbox_id,generation,message_id,reprocess_id) ' +
+        'SELECT $1,$2,message_id,$3 FROM candidates WHERE skip IS NOT TRUE ' +
+        'ON CONFLICT (mailbox_id,generation,message_id) DO UPDATE SET reprocess_id=excluded.reprocess_id,' +
+        'accepted_at=CASE WHEN gmail_deliveries.completed_at IS NOT NULL THEN excluded.accepted_at ELSE gmail_deliveries.accepted_at END,' +
+        'attempts=CASE WHEN gmail_deliveries.completed_at IS NOT NULL THEN 0 ELSE gmail_deliveries.attempts END,' +
+        'attempt_id=CASE WHEN gmail_deliveries.completed_at IS NOT NULL THEN NULL ELSE gmail_deliveries.attempt_id END,' +
+        'due_at=CASE WHEN gmail_deliveries.completed_at IS NOT NULL THEN now() ELSE gmail_deliveries.due_at END,completed_at=NULL ' +
+        'WHERE gmail_deliveries.reprocess_id IS DISTINCT FROM excluded.reprocess_id',
+        [scan.id, scan.generation, scan.run_id, ids, scan.to_at],
+      );
+    });
+  }
+
   async dispatchOne() {
-    const url = this.config.N8N_GMAIL_WEBHOOK_URL;
-    if (!url || !this.config.GOOGLE_CLIENT_ID || !this.config.GOOGLE_CLIENT_SECRET) return false;
+    if (!this.config.GOOGLE_CLIENT_ID || !this.config.GOOGLE_CLIENT_SECRET) return false;
     const attemptId = randomUUID();
     const { rows: [job] } = await this.db.query<Job>(
       'WITH claim AS (UPDATE gmail_deliveries SET attempt_id=$1,attempts=attempts+1,received_at=NULL,' +
       "due_at=now()+interval '3 minutes' WHERE id=(SELECT d.id FROM gmail_deliveries d JOIN mailboxes m ON m.id=d.mailbox_id " +
       "WHERE d.completed_at IS NULL AND d.due_at<=now() AND m.state='active' AND m.source='oauth' AND m.generation=d.generation " +
       'ORDER BY d.due_at FOR UPDATE OF d SKIP LOCKED LIMIT 1) RETURNING *) ' +
-      'SELECT m.*,claim.id AS delivery_id,claim.message_id,claim.attempts FROM claim JOIN mailboxes m ON m.id=claim.mailbox_id', [attemptId],
+      'SELECT m.*,claim.id AS delivery_id,claim.message_id,claim.attempts,claim.reprocess_id,r.from_at,r.to_at ' +
+      'FROM claim JOIN mailboxes m ON m.id=claim.mailbox_id LEFT JOIN gmail_reprocess_runs r ON r.id=claim.reprocess_id',
+      [attemptId],
     );
     if (!job) return false;
     try {
+      if (job.reprocess_id && job.attempts > maxReprocessAttempts) {
+        await this.closeDelivery(job, attemptId, 'error');
+        return true;
+      }
       const access = await this.accessToken(job);
       const message = await this.request<RawMessage>('messages/' + encodeURIComponent(job.message_id) + '?format=raw', access);
       const received = new Date(/^\d+$/.test(message.internalDate) ? Number(message.internalDate) : NaN);
-      if (message.id !== job.message_id || !Number.isFinite(+received) || received < job.linked_at ||
+      const from = job.from_at ?? job.linked_at;
+      if (!Number.isFinite(+received) || received < from || (job.to_at && received >= job.to_at)) {
+        await this.closeDelivery(job, attemptId, 'skipped');
+        return true;
+      }
+      if (message.id !== job.message_id ||
           typeof message.raw !== 'string' || !message.raw.length || message.raw.length > maxRawSize ||
           !/^[A-Za-z0-9_-]+={0,2}$/.test(message.raw)) {
-        await this.closeDelivery(job.delivery_id, attemptId);
+        await this.closeDelivery(job, attemptId, 'error');
         return true;
       }
       const mime = await simpleParser(Buffer.from(message.raw, 'base64url'), {
         skipImageLinks: true, skipTextToHtml: true, skipHtmlToText: false,
       });
-      const bound = await this.db.query(
+      const bound = await this.db.query<{ openai_enabled: boolean }>(
         'UPDATE gmail_deliveries d SET received_at=$3 FROM mailboxes m WHERE d.id=$1 AND d.attempt_id=$2 ' +
-        "AND d.completed_at IS NULL AND m.id=d.mailbox_id AND m.generation=d.generation AND m.state='active'",
+        "AND d.completed_at IS NULL AND m.id=d.mailbox_id AND m.generation=d.generation AND m.state='active' " +
+        'RETURNING m.openai_consented_at IS NOT NULL AS openai_enabled',
         [job.delivery_id, attemptId, received],
       );
       if (!bound.rowCount) return true;
-      const response = await fetch(url, {
-        method: 'POST', redirect: 'error', signal: AbortSignal.timeout(8000),
-        headers: { 'Content-Type': 'application/json', 'X-MailGasto-Agent': this.config.N8N_AGENT_KEY },
-        body: JSON.stringify({
-          deliveryId: job.delivery_id, attemptId, messageId: job.message_id, receivedAt: received.toISOString(),
-          labels: Array.isArray(message.labelIds) ? message.labelIds : [],
-          from: mime.from?.value.length === 1 ? (mime.from.value[0].address ?? '').slice(0, 320) : '',
-          subject: (mime.subject ?? '').slice(0, 1000), text: (mime.text ?? '').replace(/\r\n?/g, '\n').slice(0, 30_000),
-        }),
-      });
-      await response.body?.cancel();
-      if (response.status !== 202) throw new Error('Webhook did not accept delivery');
+      const identity = { deliveryId: job.delivery_id, attemptId, messageId: job.message_id, receivedAt: received.toISOString() };
+      const fromAddress = mime.from?.value.length === 1 ? (mime.from.value[0].address ?? '').slice(0, 320) : '';
+      const email = {
+        labels: Array.isArray(message.labelIds) ? message.labelIds : [],
+        from: fromAddress,
+        subject: (mime.subject ?? '').slice(0, 1000), text: (mime.text ?? '').replace(/\r\n?/g, '\n').slice(0, 30_000),
+      };
+      const useOpenAi = bound.rows[0].openai_enabled && Boolean(this.config.OPENAI_API_KEY);
+      const gmailAuthentication = mime.headerLines.find(({ key, line }) =>
+        key === 'authentication-results' && /^authentication-results:\s*mx\.google\.com\s*;/i.test(line));
+      const domain = fromAddress.split('@')[1]?.toLowerCase();
+      const authenticated = Boolean(domain && gmailAuthentication &&
+        /\bdmarc=pass\b[^;]*\bheader\.from=([a-z\d.-]+)/i.exec(gmailAuthentication.line)?.[1]?.toLowerCase() === domain);
+      const classification = await this.extraction.classify(email, useOpenAi, authenticated);
+      if (useOpenAi || !this.config.N8N_GMAIL_WEBHOOK_URL || classification.status === 'registered' ||
+          (job.reprocess_id && classification.status === 'ignored')) {
+        await this.results.save({ source: 'oauth', ...identity, ...classification });
+      } else {
+        await this.deliverToN8n(this.config.N8N_GMAIL_WEBHOOK_URL, { ...identity, ...email });
+      }
     } catch (error) {
       if (isRevoked(error)) {
         await this.db.query("UPDATE mailboxes SET state='reconnect',sync_lease=NULL WHERE id=$1 AND generation=$2 AND state='active'",
           [job.id, job.generation]);
       } else if (error instanceof GoogleError && error.status === 404) {
-        await this.closeDelivery(job.delivery_id, attemptId);
+        await this.closeDelivery(job, attemptId, 'skipped');
+      } else if (job.reprocess_id && job.attempts >= maxReprocessAttempts) {
+        await this.closeDelivery(job, attemptId, 'error');
       } else {
         const delay = Math.min(900, 180 * 2 ** Math.min(job.attempts - 1, 3));
         await this.db.query('UPDATE gmail_deliveries SET due_at=now()+make_interval(secs=>$3::double precision) ' +
@@ -344,8 +506,18 @@ export class Gmail {
     return true;
   }
 
-  private closeDelivery(id: string, attemptId: string) {
-    return this.db.query('UPDATE gmail_deliveries SET completed_at=now() WHERE id=$1 AND attempt_id=$2 AND completed_at IS NULL', [id, attemptId]);
+  private async deliverToN8n(url: string, body: object) {
+    const response = await fetch(url, {
+      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(8000),
+      headers: { 'Content-Type': 'application/json', 'X-MailGasto-Agent': this.config.N8N_AGENT_KEY },
+      body: JSON.stringify(body),
+    });
+    await response.body?.cancel();
+    if (response.status !== 202) throw new Error('Webhook did not accept delivery');
+  }
+
+  private closeDelivery(job: Job, attemptId: string, outcome: 'error' | 'skipped') {
+    return this.db.transaction(client => finishGmailDelivery(client, job.delivery_id, attemptId, outcome));
   }
 
   private async accessToken(mailbox: Mailbox) {

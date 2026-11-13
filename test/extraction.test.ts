@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readConfig } from '../src/config.js';
 import { candidate, resolveExtraction } from '../src/extraction.js';
+import { GmailExtraction } from '../src/gmail-extraction.js';
 import { localIntent } from '../src/history.js';
-import { readGmailModel, resolveGmailExtraction } from '../src/mail-rules.js';
+import { gmailBankSenders, readGmailModel, resolveGmailExtraction } from '../src/mail-rules.js';
 
 const senders = { 'alertas@nequi.example': 'nequi', '@bancolombia.example': 'bancolombia' } as const;
 const sample = 'Pagaste COP 25.000 en Restaurante Demo el 10/11/2026.';
@@ -94,4 +96,66 @@ test('detects intent and inherited period without allowing chat to create transa
   assert.equal(localIntent('¿Cuánto gasté en ropa este mes?').category, 'compras');
   assert.equal(localIntent('Registra un gasto de 25000').action, 'register');
   assert.equal(localIntent('¿Cuánto gasté el 2026-11-10?').action, 'summary');
+});
+
+test('uses rules for authenticated Bancolombia formats and sends only a protected fragment to OpenAI with consent', async t => {
+  const service = new GmailExtraction(readConfig({
+    PUBLIC_URL: 'http://localhost:3105', DATABASE_URL: 'postgres://test@localhost/mailgasto_test',
+    ENCRYPTION_KEY: 'ab'.repeat(32), N8N_AGENT_KEY: 'test-agent-key-for-local-testing',
+    N8N_INGEST_KEY: 'test-ingest-key-for-local-testing', SMTP_URL: 'smtp://localhost:1026',
+    SMTP_FROM: 'test@example.test', OPENAI_API_KEY: 'synthetic-key-used-only-by-mock',
+  }));
+  const mock = t.mock.method(globalThis, 'fetch', async () => Response.json({
+    status: 'completed',
+    output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify({
+      classification: 'completed', amountMinor: '2500000', currency: 'COP', date: '2026-11-13',
+      description: null, category: 'ingresos', categoryEvidence: null, direction: 'income', confidence: 0.98,
+    }) }] }],
+  }));
+  const sender = Object.keys(gmailBankSenders)[0];
+  const labels = ['INBOX'];
+  const subject = 'Alertas y Notificaciones';
+  const formats = [
+    ['Recibiste un pago de nómina por $1,257,483.12 en el producto *1234, el 13/11/2026 a las 10:08.',
+      '125748312', 'income', null, '10:08', 'Pago de nómina'],
+    ['Pagaste $218,700.00 a TELEFONIA DEMO S.A. desde el producto *1234 con el Botón Bancolombia el 13/11/2026 a las 10:46:22.',
+      '21870000', 'expense', 'Botón Bancolombia', '10:46:22', 'TELEFONIA DEMO S.A.'],
+    ['Pagaste $25,000.00 por QR el 13/11/2026 a las 11:21.', '2500000', 'expense', 'QR', '11:21', 'Salida de dinero · QR'],
+    ['Compraste $270,779.00 en TIENDA DEMO con tu T.Deb *1234, el 13/11/2026 a las 11:46.',
+      '27077900', 'expense', 'Tarjeta', '11:46', 'TIENDA DEMO'],
+  ] as const;
+  for (const [notice, amount, direction, method, time, description] of formats) {
+    const text = 'Bancolombia: ' + notice + '\nPor tu seguridad, no compartas códigos de verificación.';
+    const result = await service.classify({ labels, from: sender, subject, text }, true, true);
+    assert.equal(result.status, 'registered');
+    if (result.status === 'registered') {
+      const m = result.movement;
+      assert.deepEqual([m.amountMinor, m.direction, m.paymentMethod, m.transactionTime, m.description], [amount, direction, method, time, description]);
+      assert.equal(m.reportedInstitution, 'bancolombia');
+      assert.equal(m.cardLast4, method === 'Tarjeta' ? '1234' : null);
+    }
+  }
+  const payment = {
+    labels, from: 'tienda@ejemplo.test', subject: 'Aviso de transferencia',
+    text: 'Hola Persona Destinataria\nRecibiste una transferencia de $25.000 de Persona Sintética en tu cuenta el 13 de noviembre de 2026. ' +
+      'Producto 123456789012; teléfono 3215555555; https://example.test; titular@example.test',
+  };
+  assert.equal((await service.classify({ ...payment, from: sender }, false, false)).status, 'pending');
+  assert.equal((await service.classify(payment, false, true)).status, 'pending');
+  assert.equal(mock.mock.callCount(), 0);
+  assert.equal((await service.classify(payment, true, true)).status, 'registered');
+  assert.equal(mock.mock.callCount(), 1);
+  const [url, init] = mock.mock.calls[0].arguments as unknown as [string, RequestInit];
+  assert.equal(url, 'https://api.openai.com/v1/responses');
+  const sent = JSON.parse(init.body as string);
+  assert.equal(sent.model, 'gpt-5.4-mini-2026-03-17');
+  assert.equal(sent.store, false);
+  assert.equal(sent.text.format.strict, true);
+  assert.match(sent.input, /\$25\.000/);
+  assert.match(sent.input, /13 de noviembre de 2026/);
+  assert.doesNotMatch(sent.input, /Persona (?:Sintética|Destinataria)|123456789012|3215555555|example\.test/);
+  mock.mock.mockImplementationOnce(async () => Response.json({
+    status: 'completed', output: [{ type: 'message', content: [{ type: 'refusal' }] }],
+  }));
+  assert.equal((await service.classify(payment, true, true)).status, 'pending');
 });

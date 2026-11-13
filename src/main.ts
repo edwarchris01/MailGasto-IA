@@ -11,6 +11,7 @@ import { Api } from './api.js';
 import { CONFIG, Config, readConfig } from './config.js';
 import { Database } from './db.js';
 import { Gmail } from './gmail.js';
+import { GmailExtraction } from './gmail-extraction.js';
 import { GmailResults } from './gmail-results.js';
 import { Finance } from './finance.js';
 import { GoogleSignin } from './google-signin.js';
@@ -25,7 +26,7 @@ export async function createApp(config: Config, startWorker = true) {
     module: App,
     controllers: [Api],
     providers: [
-      { provide: CONFIG, useValue: config }, Database, Accounts, Agent, Gmail, GmailResults, History, Finance, GoogleSignin,
+      { provide: CONFIG, useValue: config }, Database, Accounts, Agent, Gmail, GmailExtraction, GmailResults, History, Finance, GoogleSignin,
       ...(startWorker ? [Worker] : []),
     ],
   }, { bodyParser: false, logger: ['error', 'warn'] });

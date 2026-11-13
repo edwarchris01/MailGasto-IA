@@ -8,6 +8,9 @@ export type Provider = typeof providers[number];
 export type NoticeText = { provider: Provider; forwarded: boolean; text: string };
 export type GmailNotice = Omit<NoticeText, 'text'> & { subject: string; body: string; payment?: GmailPayment };
 export type SenderMap = Readonly<Record<string, typeof bankProviders[number]>>;
+export const gmailBankSenders: SenderMap = {
+  'alertasynotificaciones@an.notificacionesbancolombia.com': 'bancolombia',
+};
 export const normalize = (text: string) => text.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
 const bareAddress = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
 const forwardedHeader = /(?:^|\n)[ \t]*(?:-+\s*(?:forwarded message|mensaje reenviado|original message|mensaje original)\s*-+|begin forwarded message:)[ \t]*\n/i;
@@ -17,6 +20,7 @@ const notCompleted = /\b(?:(?:pago|compra|transferencia|transaccion|abono) (?:(?
 const expenseEvidence = /\b(?:pagaste|compraste|enviaste|transferiste|retiraste|recibimos tu pago|realizaste un (?:pago|retiro)|te (?:debitaron|cobraron|descontaron)|se (?:te )?(?:debito|cobro)|compra (?:fue )?(?:confirmada|aprobada|realizada|exitosa|procesada|completada)|tu pago (?:fue )?(?:confirmado|aprobado|realizado|exitoso|procesado|completado))\b/;
 const incomeEvidence = /\b(?:recibiste|te (?:enviaron|transfirieron|abonaron|acreditaron|consignaron|reembolsaron)|se (?:te )?(?:abono|acredito|consigno)|(?:transferencia|consignacion|deposito|abono|reembolso|desembolso) (?:fue )?(?:recibid[oa]|acreditad[oa]|abonad[oa])|pago recibido en tu cuenta)\b/;
 const conditional = /\bsi (?:ya )?(?:pagaste|compraste|recibiste|transferiste|enviaste)\b/g;
+const gmailSecurityFooter = /(?:\bpor tu seguridad\b|\bprotege tus datos\b|\bsi tienes dudas[, ]+(?:ll[aá]manos|hablemos|encu[eé]ntranos)\b|\beste es un (?:correo|mensaje) autom[aá]tico\b|\beste es una notificaci[oó]n autom[aá]tica\b|\baviso de confidencialidad\b)/i;
 const cardLabel = /(?:tarjeta(?:[ \t]+(?:de[ \t]+)?(?:d[eé]bito|cr[eé]dito))?|t[ \t]*\.[ \t]*(?:d[eé]b(?:ito)?|cr[eé]d(?:ito)?))\b/.source;
 const cardNumberPrefix = /[ \t]*\.?[ \t]*(?:(?:terminad[ao][ \t]+en|n[uú]mero|nro\.?|no\.?|de|es)[ \t]+)?[:# \t-]*/.source;
 const cardMask = /[*x×•●](?:[ .\t-]{0,3}[*x×•●]){0,18}[ .\t-]{0,3}/.source;
@@ -61,6 +65,11 @@ export function candidate(from: string, subject: string, body: string, senders: 
   const provider = Object.hasOwn(senders, sender) ? senders[sender] : Object.hasOwn(senders, domain) ? senders[domain] : null;
   subject = subject.slice(0, 1000).trim();
   body = body.split(/\n(?:--\s*$|aviso de confidencialidad|este correo es confidencial)/im, 1)[0].trim();
+  const footer = body.search(gmailSecurityFooter);
+  if (footer > 0) {
+    const beforeFooter = normalize(body.slice(0, footer));
+    if (expenseEvidence.test(beforeFooter) || incomeEvidence.test(beforeFooter)) body = body.slice(0, footer).trim();
+  }
   // Look at the mask before redaction, without cutting a longer identifier into a four-digit suffix.
   const payment = extractGmailPayment(subject, body);
   subject = redact(subject).trim();
@@ -192,7 +201,7 @@ function extractGmailTime(text: string, dates: ReturnType<typeof findDates>, dat
 }
 
 export const currencies = ['COP', 'USD', 'EUR'] as const;
-export const paymentMethods = ['Nequi', 'Bancolombia', 'Tarjeta', 'PSE', 'Transferencia'] as const;
+export const paymentMethods = ['Nequi', 'Bancolombia', 'Tarjeta', 'PSE', 'Transferencia', 'QR', 'Botón Bancolombia'] as const;
 export const cardTypes = ['debit', 'credit'] as const;
 export const cardLast4Pattern = /^\d{4}$/;
 type GmailPayment = {
@@ -201,7 +210,7 @@ type GmailPayment = {
   cardLast4: string | null;
 };
 
-const paymentToken = '(?:' + cardLabel + '|nequi\\b|pse\\b|transferencia\\b)';
+const paymentToken = '(?:' + cardLabel + '|nequi\\b|pse\\b|(?:codigo[ \\t]+)?qr\\b|boton[ \\t]+bancolombia\\b|transferencia\\b)';
 const paymentContext = /\b(?:(?:con|mediante|por|via|usando|a traves de)[ \t]+(?:(?:tu|su|una|la|el)[ \t]+)?|(?:medio|metodo|forma) de pago[ \t]*[:=][ \t]*)/.source;
 const paymentMention = new RegExp('(?:' + paymentContext + '|^[ \\t]*(?=' + cardLabel + '[ \\t]*[:=]))(' + paymentToken + ')', 'gm');
 const nextPayment = new RegExp('^[ \\t]*(?:[,/]|\\b[oy]\\b)[ \\t]*(?:(?:tu|su|una|la|el)[ \\t]+)?(' + paymentToken + ')');
@@ -209,10 +218,14 @@ const cardToken = new RegExp('^' + cardLabel + '$');
 const maskedCardSuffix = new RegExp('^' + cardNumberPrefix + cardMask + '(\\d{4})(?![\\w:/]|[.,]\\d|[ .\\t-]+[\\d*x×•●])');
 const purchaseMerchant = new RegExp('\\b(?:compraste|pagaste)[ \\t]+(?:' + explicitAmount + '|' + numberToken + ')[ \\t]+en[ \\t]+' +
   '([^\\n]{1,160}?)(?=,?[ \\t]+(?:' + paymentContext + paymentToken + '|el[ \\t]+(?:d[ií]a[ \\t]+)?' + dateText + '\\b))', 'giu');
+const buttonMerchant = new RegExp('\\bpagaste\\s+(?:' + explicitAmount + '|' + numberToken +
+  ')\\s+a\\s+([^\\n]{1,160}?)(?=\\s+(?:desde (?:tu |el |la )?(?:cuenta|producto)|con (?:el )?bot[oó]n|el\\s+' + dateText + '\\b))', 'giu');
 
 function extractPurchaseMerchant(body: string) {
-  const names = [...body.matchAll(purchaseMerchant)].map(match => match[1].trim().replace(/,$/, '').trim());
-  return singleValue(names.filter(name => /\p{L}/u.test(name) && !/[.!?]\s/.test(name) && !findDates(normalize(name)).length));
+  const names = [...body.matchAll(purchaseMerchant), ...body.matchAll(buttonMerchant)]
+    .map(match => match[1].trim().replace(/,$/, '').trim());
+  return singleValue(names.filter(name => /\p{L}/u.test(name) &&
+    !/[.!?]\s/.test(name.replace(/\b(?:[\p{L}]\.){2,}/gu, '')) && !findDates(normalize(name)).length));
 }
 
 function extractGmailPayment(subject: string, body: string): GmailPayment {
@@ -222,7 +235,8 @@ function extractGmailPayment(subject: string, body: string): GmailPayment {
   const suffixes: string[] = [];
   const addMethod = (token: string, tail: string) => {
     if (!cardToken.test(token)) {
-      methods.push(token === 'nequi' ? 'Nequi' : token === 'pse' ? 'PSE' : 'Transferencia');
+      methods.push(token === 'nequi' ? 'Nequi' : token === 'pse' ? 'PSE' :
+        token.endsWith('qr') ? 'QR' : token.startsWith('boton') ? 'Botón Bancolombia' : 'Transferencia');
       return 0;
     }
     methods.push('Tarjeta');
@@ -238,7 +252,8 @@ function extractGmailPayment(subject: string, body: string): GmailPayment {
     const second = nextPayment.exec(following);
     if (second) addMethod(second[1], following.slice(second[0].length));
   }
-  const paymentMethod = singleValue(methods);
+  const paymentMethod = singleValue(methods) ?? (methods.length === 0 &&
+    /\b(?:recibiste una transferencia|transferencia recibida)\b/.test(text) ? 'Transferencia' : null);
   return {
     paymentMethod,
     cardType: paymentMethod === 'Tarjeta' ? singleValue(types) : null,
@@ -249,6 +264,30 @@ function extractGmailPayment(subject: string, body: string): GmailPayment {
 function extractReportedInstitution(text: string) {
   const mentions = [...text.matchAll(/^[ \t]*(?:(?:banco|entidad)(?: emisora)?[ \t]*:[ \t]*)?(nequi|bancolombia)\b[ \t]*(?=:|$|te informa\b)/gm)];
   return singleValue(mentions.flatMap(match => bankProviders.filter(bank => bank === match[1])));
+}
+
+const gmailOperation = /\b(?:recibiste(?: un pago de nomina| una transferencia)?|compraste|pagaste|transferiste|enviaste|retiraste|te (?:enviaron|transfirieron|abonaron|acreditaron|consignaron|reembolsaron)|se (?:te )?(?:abono|acredito|consigno|debito|cobro))\b/i;
+const payrollConcept = /\b(?:recibiste un pago de n[oó]mina|abono de n[oó]mina)\b/i;
+
+export function openAiNoticeText(notice: Pick<GmailNotice, 'subject' | 'body'>) {
+  const body = notice.body.replace(/^[ \t]*(?:hola|estimad[oa]|apreciad[oa]|señor(?:a)?|cliente)\b[^\n]*(?:\n|$)/gim,
+    line => transactionWords.test(normalize(line)) ? line : '');
+  const minimize = (text: string) => redact(text)
+    .replace(/\b(?:llave(?: de pago)?|producto|cuenta|id de transacci[oó]n|n[uú]mero de transacci[oó]n)\s*[:#*xX -]*\d[\d* xX-]*/gi,
+      '[identificador]')
+    .replace(/\b(\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2} de \p{L}+ de \d{4})\b|\b(\d{1,2}:\d{2}(?::\d{2})?)\b|(?:COP|USD|EUR|US\$|[$€])\s*\d[\d.,]*|\b\d[\d.,]*\s*(?:COP|USD|EUR)\b|\b\d{4,}\b/giu,
+      (value, date: string | undefined, time: string | undefined) =>
+        date || time || /[$€]|\b(?:COP|USD|EUR)\b/i.test(value) ? value : '[identificador]')
+    .replace(/(\b(?:recibiste(?: una transferencia)?|transferiste|enviaste|pagaste por (?:c[oó]digo )?qr)[^\n]{0,95}?\s+(?:de|a))\s+[\p{L}][\p{L} .'-]{2,100}?(?=\s+(?:en (?:tu |la )?cuenta|el \d|a las \d|desde|por valor)|[.;\n]|$)/giu,
+      '$1 [contraparte]')
+    .replace(/(^|[;\n])([ \t]*(?:titular|destinatario|beneficiario|ordenante|nombre del (?:cliente|titular))\s*[:=])[^\n;]+/gim,
+      '$1$2 [contraparte]');
+  // Keep transaction lines and their neighbors so most greetings and signatures can be dropped.
+  const lines = minimize(body).split('\n');
+  const relevant = lines.map(line => transactionWords.test(normalize(line)) ||
+    /[$€]|\b(?:COP|USD|EUR|fecha|hora|comercio|concepto|medio de pago)\b/i.test(line));
+  return { subject: minimize(notice.subject).slice(0, 240),
+    body: lines.filter((_, index) => relevant[index] || relevant[index - 1] || relevant[index + 1]).join('\n').slice(0, 2200) };
 }
 
 export const directions = ['expense', 'income'] as const;
@@ -374,7 +413,7 @@ function resolveChecked(
     if (!date) fields.push('date');
     if (!direction) fields.push('direction');
     return technicalFailure
-      ? { status: 'error' as const, reason: 'extractor_unavailable' as const, confidence: 0 }
+      ? { status: 'error' as const, reason: 'extractor_unavailable' as const, confidence: 0 as const }
       : { status: 'pending' as const, reason: 'missing_or_ambiguous_fields' as const, confidence, unconfirmedFields: fields };
   }
   if (model) {
@@ -410,17 +449,26 @@ export function resolveExtraction(notice: NoticeText, raw: unknown, technicalFai
   return resolveChecked(checked, model, category, { technicalFailure });
 }
 
-export function resolveGmailExtraction(notice: GmailNotice, model: ReturnType<typeof readGmailModel>) {
+export function resolveGmailExtraction(notice: GmailNotice, model: ReturnType<typeof readGmailModel>, allowLocalReview = false) {
   const checked = inspectGmailNotice(notice);
   const evidence = checked.text.replace(conditional, '');
   if (model?.classification === 'not_transaction' && (expenseEvidence.test(evidence) || incomeEvidence.test(evidence))) {
     model = { ...model, classification: 'uncertain' };
   }
   if (model?.classification === 'not_transaction' || notCompleted.test(checked.text)) return { status: 'ignored' as const };
-  if (!model && notice.provider === 'other') return { status: 'error' as const, reason: 'extractor_unavailable' as const, confidence: 0 };
-  const merchant = extractPurchaseMerchant(notice.body);
+  const merchant = extractPurchaseMerchant(notice.body) ?? (payrollConcept.test(notice.body) ? 'Pago de nómina' : null);
+  const operation = gmailOperation.exec(normalize(notice.body));
+  const operatedAmount = operation ? extractGmailMoney(notice.body.slice(operation.index)) : null;
+  const literal = Boolean(allowLocalReview && operation && checked.date && checked.direction && checked.money &&
+    notice.provider !== 'other' && !notice.forwarded && operatedAmount?.currency === checked.money.currency &&
+    operatedAmount.amountMinor === checked.money.amountMinor);
+  if (literal) model = null;
+  if (!model && notice.provider === 'other' && !allowLocalReview) {
+    return { status: 'error' as const, reason: 'extractor_unavailable' as const, confidence: 0 as const };
+  }
   const result = resolveChecked(checked, model, chooseGmailCategory(notice, model, merchant), {
-    technicalFailure: !model, requireMethod: false, uncertain: model?.classification === 'uncertain', merchant,
+    technicalFailure: !model && (Boolean(literal) || !allowLocalReview), requireMethod: false,
+    uncertain: model?.classification === 'uncertain', merchant,
   });
   const { date, paymentMethod, cardType, cardLast4, transactionTime, reportedInstitution } = checked;
   const details = { cardType, cardLast4, transactionTime, reportedInstitution };

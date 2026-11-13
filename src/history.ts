@@ -65,7 +65,8 @@ export class History {
   async detail(account: string, id: string) {
     const { rows: [record] } = await this.db.query(
       'SELECT ' + selection + ',n.unconfirmed_fields,n.reported_transaction_date::text,n.transaction_time,' +
-      'n.reported_payment_method,n.card_type,n.card_last4,n.reported_institution ' + noticeSource +
+      'n.reported_payment_method,n.card_type,n.card_last4,n.reported_institution,' +
+      'n.reported_amount_minor::text,n.reported_currency,n.reported_direction ' + noticeSource +
       "WHERE m.account_id=$1 AND n.id=$2 AND n.status<>'discarded'", [account, id],
     );
     if (!record) throw new NotFoundException('Aviso no encontrado.');

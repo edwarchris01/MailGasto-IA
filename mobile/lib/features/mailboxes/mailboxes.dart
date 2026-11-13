@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -15,7 +17,23 @@ typedef Mailbox = ({
   String state,
   String source,
   String? syncedAt,
+  bool openAiAvailable,
+  bool openAiEnabled,
+  ReprocessStatus? reprocess,
 });
+
+class ReprocessStatus {
+  ReprocessStatus(Json row)
+    : finishedAt = row['finishedAt'] as String?,
+      failure = row['failure'] as String?,
+      summary = row['summary'] as Json? ?? const {};
+
+  final String? finishedAt, failure;
+  final Json summary;
+
+  bool get running => finishedAt == null;
+  int count(String key) => summary[key] as int? ?? 0;
+}
 
 final mailboxRepositoryProvider = Provider((ref) {
   ref.watch(authProvider.select((auth) => auth.asData?.value?.id));
@@ -55,6 +73,11 @@ class MailboxRepository {
           state: row['state'] as String,
           source: row['source'] as String,
           syncedAt: row['last_synced_at'] as String?,
+          openAiAvailable: row['openai_available'] == true,
+          openAiEnabled: row['openai_enabled'] == true,
+          reprocess: row['reprocess'] == null
+              ? null
+              : ReprocessStatus(row['reprocess'] as Json),
         ),
       )
       .toList();
@@ -77,6 +100,17 @@ class MailboxRepository {
   Future<void> reconnectExisting() =>
       api.request('mailboxes/gmail/existing', method: 'POST');
 
+  Future<void> reprocessMonth(String id) => api.request(
+    'mailboxes/${Uri.encodeComponent(id)}/reprocess',
+    method: 'POST',
+  );
+
+  Future<void> setOpenAi(String id, bool enabled) => api.request(
+    'mailboxes/${Uri.encodeComponent(id)}/openai',
+    method: 'PATCH',
+    body: {'enabled': enabled},
+  );
+
   Future<bool> disconnect(String id) async =>
       (await api.object(
         'mailboxes/${Uri.encodeComponent(id)}',
@@ -94,6 +128,32 @@ class MailboxesScreen extends ConsumerStatefulWidget {
 
 class _MailboxesScreenState extends ConsumerState<MailboxesScreen> {
   bool _busy = false;
+  Timer? _poll;
+
+  @override
+  void initState() {
+    super.initState();
+    ref.listenManual(mailboxesProvider, (_, next) {
+      final mailboxes = next.asData?.value;
+      if (mailboxes == null) return;
+      if (mailboxes.any((mailbox) => mailbox.reprocess?.running == true)) {
+        _poll ??= Timer.periodic(const Duration(seconds: 4), (_) {
+          if (mounted && !ref.read(mailboxesProvider).isLoading) {
+            ref.invalidate(mailboxesProvider);
+          }
+        });
+      } else {
+        _poll?.cancel();
+        _poll = null;
+      }
+    }, fireImmediately: true);
+  }
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    super.dispose();
+  }
 
   Future<void> _run(Future<void> Function() action) async {
     if (_busy) return;
@@ -191,6 +251,47 @@ class _MailboxesScreenState extends ConsumerState<MailboxesScreen> {
     }
   }
 
+  Future<void> _reprocess(Mailbox mailbox) => _run(() async {
+    await ref.read(mailboxRepositoryProvider).reprocessMonth(mailbox.id);
+    if (mounted) {
+      ref.invalidate(mailboxesProvider);
+      showMessage(context, 'Revisión del mes iniciada.');
+    }
+  });
+
+  Future<void> _toggleOpenAi(Mailbox mailbox) => _run(() async {
+    final enabled = !mailbox.openAiEnabled;
+    if (enabled) {
+      final accepted = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Usar OpenAI en este buzón'),
+          scrollable: true,
+          content: const Text(
+            'Si las reglas locales no son suficientes, MailGasto enviará a '
+            'OpenAI un fragmento del aviso que puede incluir el monto, la '
+            'fecha y el comercio. Antes de enviarlo oculta números de cuenta '
+            'y otros identificadores detectados. Puedes desactivar el envío '
+            'en cualquier momento desde este buzón.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Permitir'),
+            ),
+          ],
+        ),
+      );
+      if (accepted != true || !mounted) return;
+    }
+    await ref.read(mailboxRepositoryProvider).setOpenAi(mailbox.id, enabled);
+    if (mounted) ref.invalidate(mailboxesProvider);
+  });
+
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(mailboxesProvider);
@@ -253,6 +354,12 @@ class _MailboxesScreenState extends ConsumerState<MailboxesScreen> {
                             onDisconnect: _busy
                                 ? null
                                 : () => _disconnect(mailbox),
+                            onReprocess: _busy
+                                ? null
+                                : () => _reprocess(mailbox),
+                            onToggleOpenAi: _busy
+                                ? null
+                                : () => _toggleOpenAi(mailbox),
                           ),
                         ],
                       ],
@@ -309,9 +416,11 @@ class _MailboxCard extends StatelessWidget {
     this.mailbox, {
     required this.onReconnect,
     required this.onDisconnect,
+    required this.onReprocess,
+    required this.onToggleOpenAi,
   });
   final Mailbox mailbox;
-  final VoidCallback? onReconnect, onDisconnect;
+  final VoidCallback? onReconnect, onDisconnect, onReprocess, onToggleOpenAi;
 
   @override
   Widget build(BuildContext context) {
@@ -324,6 +433,8 @@ class _MailboxCard extends StatelessWidget {
     };
     final reconnect =
         mailbox.state == 'reconnect' || mailbox.state == 'disconnected';
+    final reprocess = mailbox.reprocess;
+    final canReprocess = mailbox.source == 'oauth' && mailbox.state == 'active';
     final reconnectButton = FilledButton.tonalIcon(
       onPressed: onReconnect,
       icon: const Icon(Icons.refresh_rounded),
@@ -379,6 +490,26 @@ class _MailboxCard extends StatelessWidget {
             const SizedBox(height: 10),
             Text('Sin fecha de sincronización', style: text.bodySmall),
           ],
+          if (reprocess != null) ...[
+            const SizedBox(height: 12),
+            _ReprocessResult(reprocess),
+          ],
+          if (canReprocess) ...[
+            const SizedBox(height: 10),
+            FilledButton.tonalIcon(
+              onPressed: reprocess?.running == true ? null : onReprocess,
+              icon: const Icon(Icons.history_rounded),
+              label: const Text('Reprocesar este mes'),
+            ),
+          ],
+          if (mailbox.openAiEnabled ||
+              (canReprocess && mailbox.openAiAvailable))
+            TextButton(
+              onPressed: onToggleOpenAi,
+              child: Text(
+                mailbox.openAiEnabled ? 'Desactivar OpenAI' : 'Usar OpenAI',
+              ),
+            ),
           const SizedBox(height: 10),
           if (mailbox.state == 'reconnect')
             FormPair(first: reconnectButton, second: disconnectButton)
@@ -388,6 +519,44 @@ class _MailboxCard extends StatelessWidget {
             disconnectButton,
         ],
       ),
+    );
+  }
+}
+
+class _ReprocessResult extends StatelessWidget {
+  const _ReprocessResult(this.result);
+  final ReprocessStatus result;
+
+  @override
+  Widget build(BuildContext context) {
+    if (result.running) {
+      return const AppNotice(
+        icon: Icons.sync_rounded,
+        title: 'Revisando correos del mes',
+        description:
+            'Puedes salir de esta pantalla mientras se revisan los avisos.',
+      );
+    }
+    final failure = switch (result.failure) {
+      'mailbox_unavailable' => 'Reconecta Gmail y vuelve a intentarlo.',
+      'gmail_list_failed' =>
+        'No se pudieron leer todos los correos de Gmail. Puedes reintentar.',
+      _ => null,
+    };
+    return AppNotice(
+      icon: failure == null ? Icons.fact_check_outlined : Icons.info_outline,
+      tone: failure == null ? AppTone.info : AppTone.warning,
+      title: failure == null
+          ? 'Revisión del mes completada'
+          : 'Revisión incompleta',
+      description: [
+        ?failure,
+        '${result.count('registered')} registrados · '
+            '${result.count('pending')} por revisar · '
+            '${result.count('error')} errores',
+        '${result.count('skipped')} omitidos · '
+            '${result.count('ignored')} sin movimiento',
+      ].join('\n'),
     );
   }
 }

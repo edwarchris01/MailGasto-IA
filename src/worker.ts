@@ -36,6 +36,7 @@ export class Worker implements OnApplicationBootstrap, OnApplicationShutdown {
 
   onApplicationBootstrap() {
     this.schedule('Gmail synchronization', 1000, () => this.gmail.pollOne());
+    this.schedule('Gmail monthly reprocessing', 2000, () => this.gmail.scanReprocessPage());
     this.schedule('Gmail delivery', 250, () => this.gmail.dispatchOne());
     this.schedule('Previous notice queue', 1000, () => this.processOne());
     this.schedule('Gmail delivery cleanup', 3_600_000, () => this.pruneDeliveries());

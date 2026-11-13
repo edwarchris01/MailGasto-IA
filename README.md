@@ -1,6 +1,10 @@
 # MailGasto IA
 
-El Gmail existente y los buzones vinculados por OAuth llegan al mismo filtro de n8n. Ollama clasifica los avisos con el asunto y el cuerpo protegidos. Se registra el ingreso o egreso si el correo confirma que ocurrió y respalda el monto, la fecha y la dirección, incluso si viene de un comercio. La categoría usa el concepto que aparece en el aviso. Ropa y calzado se clasifican en Compras. NestJS sincroniza los buzones OAuth y guarda los resultados en PostgreSQL.
+NestJS sincroniza Gmail por OAuth y guarda los movimientos en PostgreSQL. Las reglas locales registran avisos de Bancolombia cuando Gmail autentica el remitente y el correo respalda el monto, la fecha y la dirección. Reconocen nómina, transferencias, pagos QR, Botón Bancolombia y compras con tarjeta. Si hace falta otra revisión, se usa el flujo configurado en n8n con Ollama, o OpenAI si está configurado y el titular lo habilitó para ese buzón. El Gmail directo conserva su flujo de n8n.
+
+En Android, **Perfil → Buzones → Reprocesar este mes** revisa los correos recibidos desde el inicio del mes en Bogotá, incluso antes de vincular el buzón. Conserva los movimientos confirmados y los avisos descartados. Si coincide el monto, la moneda, la fecha y el tipo con otro movimiento de la cuenta, el aviso queda pendiente. La revisión muestra los totales por resultado y no genera notificaciones individuales.
+
+Para ofrecer la opción de OpenAI, define **OPENAI_API_KEY** como secreto del backend. El modelo predeterminado es **OPENAI_GMAIL_MODEL=gpt-5.4-mini-2026-03-17**. Se pide consentimiento por buzón antes de usarlo. Se envía un fragmento con los identificadores detectados ocultos, sin adjuntos, y con `store: false`. El resultado debe coincidir con los datos que respalda el aviso antes de registrar un movimiento. Puedes desactivar OpenAI desde Buzones.
 
 ## Desarrollo local
 

@@ -109,9 +109,11 @@ class Notice {
       receivedAt = row['received_at'] as String,
       reason = row['reason'] as String?,
       date = row['transaction_date'] as String?,
-      currency = row['currency'] as String?,
-      minor = BigInt.tryParse(row['amount_minor'] as String? ?? ''),
-      direction = row['direction'] as String?,
+      currency = (row['currency'] ?? row['reported_currency']) as String?,
+      minor = BigInt.tryParse(
+        (row['amount_minor'] ?? row['reported_amount_minor']) as String? ?? '',
+      ),
+      direction = (row['direction'] ?? row['reported_direction']) as String?,
       paymentMethod = row['payment_method'] as String?,
       category = row['category'] as String?,
       description = row['description'] as String?,
@@ -161,6 +163,9 @@ class Notice {
       minor == null || currency == null ? null : money(minor!, currency!);
 
   String get pendingExplanation {
+    if (reason == 'possible_duplicate') {
+      return 'Ya hay un movimiento con el mismo monto, fecha y tipo. Revisa el aviso antes de confirmar que se trata de otro movimiento.';
+    }
     if (reason == 'unverified_sender') {
       return 'El correo parece confirmar un pago o ingreso. Revisa el mensaje original antes de registrar el movimiento.';
     }

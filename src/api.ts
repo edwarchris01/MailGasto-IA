@@ -153,6 +153,23 @@ export class Api {
     return this.gmail.list((await this.accounts.current(req)).id);
   }
 
+  @Post('mailboxes/:id/reprocess')
+  @HttpCode(202)
+  async reprocessMailbox(@Req() req: Request, @Param('id') id: string) {
+    const owner = await this.accounts.current(req);
+    const mailbox = input(uuid, id);
+    await this.accounts.throttle('gmail-reprocess:' + mailbox + ':' + owner.id, 6, 3600);
+    return this.gmail.reprocessMonth(owner.id, mailbox);
+  }
+
+  @Patch('mailboxes/:id/openai')
+  @HttpCode(204)
+  async configureOpenAi(@Req() req: Request, @Param('id') id: string, @Body() body: unknown) {
+    const owner = await this.accounts.current(req);
+    const { enabled } = input(z.strictObject({ enabled: z.boolean() }), body);
+    await this.gmail.setOpenAi(owner.id, input(uuid, id), enabled);
+  }
+
   @Post('mailboxes/gmail/existing')
   async existing(@Req() req: Request) {
     const owner = await this.accounts.current(req);
