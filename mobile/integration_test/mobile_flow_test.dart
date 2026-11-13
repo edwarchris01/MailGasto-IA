@@ -473,6 +473,7 @@ Future<void> _show(
     );
   }
   await tester.ensureVisible(last ? target.last : target);
+  await tester.pump();
 }
 
 Future<void> _enter(WidgetTester tester, String key, String text) async {
