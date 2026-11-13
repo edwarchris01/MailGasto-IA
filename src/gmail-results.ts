@@ -86,7 +86,7 @@ export async function finishGmailDelivery(client: PoolClient, id: string, attemp
 export class GmailResults {
   constructor(@Inject(Database) private readonly db: Database, @Inject(CONFIG) private readonly config: Config) {}
 
-  async save(result: Result) {
+  async save(result: Result, verifiedBank = false) {
     return this.db.transaction(async client => {
       const oauth = result.source === 'oauth';
       // Keep the same lock order as disconnect: mailbox, then its deliveries.
@@ -122,6 +122,34 @@ export class GmailResults {
         await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,1))', [mailbox.account_id]);
         if (reprocessId) {
           const { movement: value, ...notice } = result;
+          const confirmed = await client.query<{
+            id: string; movement_id: string; amount_minor: string; currency: string; transaction_date: string; direction: string;
+          }>(
+            'SELECT n.id,t.id AS movement_id,t.amount_minor::text,t.currency,t.transaction_date::text,t.direction ' +
+            'FROM notices n JOIN transactions t ON t.notice_id=n.id ' +
+            "WHERE n.mailbox_id=$1 AND n.message_id=$2 AND n.status='registered' FOR UPDATE OF n,t",
+            [mailbox.id, result.messageId],
+          );
+          const prior = confirmed.rows[0];
+          if (prior) {
+            if (verifiedBank && prior.amount_minor === value.amountMinor && prior.currency === value.currency &&
+                prior.transaction_date === value.date && prior.direction === value.direction) {
+              await client.query(
+                'UPDATE notices SET reported_transaction_date=COALESCE(reported_transaction_date,$2),' +
+                'transaction_time=COALESCE(transaction_time,$3),reported_payment_method=COALESCE(reported_payment_method,$4),' +
+                'card_type=CASE WHEN COALESCE(reported_payment_method,$4)=' + "'Tarjeta' THEN COALESCE(card_type,$5) ELSE card_type END," +
+                'card_last4=CASE WHEN COALESCE(reported_payment_method,$4)=' + "'Tarjeta' THEN COALESCE(card_last4,$6) ELSE card_last4 END," +
+                'reported_institution=COALESCE(reported_institution,$7) WHERE id=$1',
+                [prior.id, value.date, value.transactionTime ?? null, value.paymentMethod, value.cardType ?? null,
+                  value.cardLast4 ?? null, value.reportedInstitution ?? null],
+              );
+              if (value.paymentMethod) await client.query(
+                'UPDATE transactions SET payment_method=$2 WHERE id=$1 AND payment_method IS NULL', [prior.movement_id, value.paymentMethod],
+              );
+            }
+            await finishGmailDelivery(client, result.deliveryId!, result.attemptId!, 'skipped');
+            return { outcome: 'duplicate' };
+          }
           const matched = await client.query(
             'SELECT 1 FROM confirmed_movements m WHERE m.account_id=$1 AND m.currency=$2 AND m.direction=$3 ' +
             'AND ((m.amount_minor=$4 AND m.transaction_date=$5) OR ' +

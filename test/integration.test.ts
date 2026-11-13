@@ -415,6 +415,24 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       assert.equal(notices.rows[2].transaction_time, '10:08');
       assert.equal(notices.rows[3].id, existing.rows[0].id);
       assert.equal((await db.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, messagesBefore);
+      // A movement saved by the older workflow can be missing the time and method.
+      const confirmedId = notices.rows[3].id;
+      const original = await db.query('UPDATE transactions SET payment_method=NULL WHERE notice_id=$1 RETURNING id', [confirmedId]);
+      await db.query('UPDATE notices SET transaction_time=NULL,reported_payment_method=NULL WHERE id=$1', [confirmedId]);
+      const second = await request(path, 'POST', undefined, other);
+      assert.equal(second.status, 202);
+      assert.notDeepEqual(await second.json(), activeRun);
+      assert.equal(await gmail.scanReprocessPage(), true);
+      assert.equal(await gmail.scanReprocessPage(), true);
+      for (let index = 0; index < 5; index++) assert.equal(await gmail.dispatchOne(), true);
+      assert.equal(await gmail.dispatchOne(), false);
+      assert.equal(await gmail.scanReprocessPage(), false);
+      const enriched = await db.query(
+        'SELECT t.id,t.payment_method,n.transaction_time,t.amount_minor::text FROM transactions t JOIN notices n ON n.id=t.notice_id WHERE n.id=$1',
+        [confirmedId],
+      );
+      assert.deepEqual(enriched.rows, [{ id: original.rows[0].id, payment_method: 'QR', transaction_time: '11:21', amount_minor: '3510000' }]);
+      assert.equal((await db.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, messagesBefore);
     });
     const tokenRow = await db.query('SELECT secret FROM mailboxes WHERE id=$1', [linked]);
     assert.notEqual(tokenRow.rows[0].secret, 'refresh');

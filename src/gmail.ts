@@ -418,7 +418,10 @@ export class Gmail {
       );
       if (!saved.rowCount || !ids.length) return;
       await client.query(
-        "WITH candidates AS (SELECT ids.message_id, (n.status NOT IN ('pending','error') OR t.id IS NOT NULL OR d.received_at>=$5) AS skip " +
+        "WITH candidates AS (SELECT ids.message_id, (CASE WHEN n.status='registered' AND t.id IS NOT NULL THEN " +
+        "(n.provider='nequi' OR (n.transaction_time IS NOT NULL AND n.reported_institution IS NOT NULL " +
+        "AND (t.payment_method IS NOT NULL OR t.direction='income'))) " +
+        "ELSE n.status NOT IN ('pending','error') OR t.id IS NOT NULL END OR d.received_at>=$5) AS skip " +
         'FROM unnest($4::text[]) AS ids(message_id) LEFT JOIN notices n ON n.mailbox_id=$1 AND n.message_id=ids.message_id ' +
         'LEFT JOIN transactions t ON t.notice_id=n.id ' +
         'LEFT JOIN gmail_deliveries d ON d.mailbox_id=$1 AND d.generation=$2 AND d.message_id=ids.message_id ' +
@@ -500,25 +503,33 @@ export class Gmail {
       if (parts[1] && parts[1] !== parts[0]) {
         const alternate = { ...email, text: parts[1] };
         const alternateResult = await this.extraction.classify(alternate, false, authenticated);
-        if (classification.status === 'ignored' ||
+        if ((classification.status === 'ignored' && alternateResult.status !== 'ignored') ||
             (classification.status !== 'registered' && alternateResult.status === 'registered') ||
             (classification.status === 'pending' && alternateResult.status === 'pending' &&
               (classification.unconfirmedFields?.length ?? 0) > (alternateResult.unconfirmedFields?.length ?? 0))) {
           selected = alternate;
           classification = alternateResult;
-        } else if (classification.status === 'registered' && alternateResult.status === 'registered' &&
-            (['amountMinor', 'currency', 'date', 'direction'] as const).some(key =>
-              classification.status === 'registered' && classification.movement[key] !== alternateResult.movement[key])) {
-          const { movement: _, ...conflicting } = classification;
-          await this.results.save({ source: 'oauth', ...identity, ...conflicting,
-            status: 'pending', reason: 'unconfirmed_extraction', confidence: 0 });
-          return true;
+        } else if (classification.status === 'registered' && alternateResult.status === 'registered') {
+          const plainMovement = classification.movement;
+          const htmlMovement = alternateResult.movement;
+          if ((['amountMinor', 'currency', 'date', 'direction'] as const).some(key => plainMovement[key] !== htmlMovement[key])) {
+            const { movement: _, ...conflicting } = classification;
+            await this.results.save({ source: 'oauth', ...identity, ...conflicting,
+              status: 'pending', reason: 'unconfirmed_extraction', confidence: 0 });
+            return true;
+          }
+          const detailFields = ['paymentMethod', 'transactionTime', 'cardType', 'cardLast4', 'reportedInstitution'] as const;
+          if (detailFields.filter(key => htmlMovement[key] != null).length > detailFields.filter(key => plainMovement[key] != null).length) {
+            selected = alternate;
+            classification = alternateResult;
+          }
         }
       }
       if (useOpenAi && classification.status === 'pending') classification = await this.extraction.classify(selected, true, authenticated);
       if (useOpenAi || !this.config.N8N_GMAIL_WEBHOOK_URL || classification.status === 'registered' ||
           job.reprocess_id || classification.status === 'ignored') {
-        await this.results.save({ source: 'oauth', ...identity, ...classification });
+        await this.results.save({ source: 'oauth', ...identity, ...classification },
+          authenticated && classification.status === 'registered' && !classification.forwarded && classification.provider !== 'other');
       } else {
         await this.deliverToN8n(this.config.N8N_GMAIL_WEBHOOK_URL, { ...identity, ...selected });
       }
