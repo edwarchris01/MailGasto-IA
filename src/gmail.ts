@@ -488,7 +488,7 @@ export class Gmail {
       const authenticated = gmailAuthenticatedSender(mime.headerLines, fromAddress);
       const classification = await this.extraction.classify(email, useOpenAi, authenticated);
       if (useOpenAi || !this.config.N8N_GMAIL_WEBHOOK_URL || classification.status === 'registered' ||
-          job.reprocess_id) {
+          job.reprocess_id || classification.status === 'ignored') {
         await this.results.save({ source: 'oauth', ...identity, ...classification });
       } else {
         await this.deliverToN8n(this.config.N8N_GMAIL_WEBHOOK_URL, { ...identity, ...email });
@@ -586,7 +586,8 @@ function gmailAuthenticatedSender(headers: readonly { key: string; line: string 
       /(?:^|\.)notificacionesbancolombia\.com$/.test(from))) return true;
   return gmail.line.split(';').some(part => {
     if (!/\bdkim=pass\b/i.test(part)) return false;
-    const signer = /\bheader\.i=(?:[a-z0-9._%+-]+)?@([a-z\d.-]+)/i.exec(part)?.[1]?.toLowerCase();
+    const signer = (/\bheader\.i=(?:[a-z0-9._%+-]+)?@([a-z\d.-]+)/i.exec(part)?.[1] ??
+      /\bheader\.d=([a-z\d.-]+)/i.exec(part)?.[1])?.toLowerCase();
     return signer === domain || (signer === 'notificacionesbancolombia.com' && domain.endsWith('.' + signer));
   });
 }

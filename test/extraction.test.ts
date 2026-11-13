@@ -124,9 +124,10 @@ test('uses rules for authenticated Bancolombia formats and sends only a protecte
     ['Compraste $270,779.00 en TIENDA DEMO con tu T.Deb *1234, el 13/11/2026 a las 11:46.',
       '27077900', 'expense', 'Tarjeta', '11:46', 'TIENDA DEMO'],
   ] as const;
-  for (const [notice, amount, direction, method, time, description] of formats) {
+  for (const [index, [notice, amount, direction, method, time, description]] of formats.entries()) {
     const text = 'Bancolombia: ' + notice + '\nPor tu seguridad, no compartas códigos de verificación.';
-    const result = await service.classify({ labels, from: sender, subject, text }, true, true);
+    const from = index === 1 ? sender : 'alertasynotificaciones@ayn.notificacionesbancolombia.com';
+    const result = await service.classify({ labels, from, subject, text }, true, true);
     assert.equal(result.status, 'registered');
     if (result.status === 'registered') {
       const m = result.movement;

@@ -361,9 +361,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
     assert.equal((await request('notices/' + list.items[0].id, 'GET', undefined, owner)).status, 404);
     await poll('personal');
     await gmail.dispatchOne();
-    const ignored = filterAndResolve(oauthInput(deliveries.at(-1)!));
-    assert.equal(ignored.status, 'ignored');
-    assert.equal((await (await post(ignored)).json()).outcome, 'ignored');
+    assert.equal(deliveries.at(-1)?.messageId, 'direct');
     assert.equal((await (await request('notices', 'GET', undefined, other)).json()).items.length, 1);
     await t.test('reprocesses before linkage, preserves the confirmed notice and flags a second copy', async () => {
       const path = 'mailboxes/' + linked + '/reprocess';
