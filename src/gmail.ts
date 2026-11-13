@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import { convert } from 'html-to-text';
 import { DateTime } from 'luxon';
 import { simpleParser } from 'mailparser';
 import { CONFIG, Config, decrypt, encrypt, hash, token } from './config.js';
@@ -28,7 +29,7 @@ async function google<T>(url: string, options: RequestInit = {}): Promise<T> {
 }
 
 type Profile = { emailAddress: string; historyId: string };
-type RawMessage = { id: string; raw: string; internalDate: string; labelIds?: string[] };
+type RawMessage = { id: string; raw: string; internalDate: string; labelIds?: string[]; snippet?: string };
 type Tokens = { access_token: string; refresh_token?: string; scope?: string; expires_in?: number };
 type History = { historyId: string; nextPageToken?: string; history?: { messagesAdded?: { message: { id: string } }[] }[] };
 type Messages = { messages?: { id: string }[]; nextPageToken?: string };
@@ -468,7 +469,7 @@ export class Gmail {
         return true;
       }
       const mime = await simpleParser(Buffer.from(message.raw, 'base64url'), {
-        skipImageLinks: true, skipTextToHtml: true, skipHtmlToText: false,
+        skipImageLinks: true, skipTextToHtml: true, skipHtmlToText: true,
       });
       const bound = await this.db.query<{ openai_enabled: boolean }>(
         'UPDATE gmail_deliveries d SET received_at=$3 FROM mailboxes m WHERE d.id=$1 AND d.attempt_id=$2 ' +
@@ -486,12 +487,40 @@ export class Gmail {
       };
       const useOpenAi = bound.rows[0].openai_enabled && Boolean(this.config.OPENAI_API_KEY);
       const authenticated = gmailAuthenticatedSender(mime.headerLines, fromAddress);
-      const classification = await this.extraction.classify(email, useOpenAi, authenticated);
+      // Some messages include a plain-text alternative that contains only a notice to view the HTML.
+      // Parse both versions independently so dates, amounts and cards are not mixed across versions.
+      const html = mime.html ? convert(mime.html, {
+        wordwrap: false, limits: { maxInputLength: maxRawSize, maxDepth: 100 },
+        selectors: [{ selector: 'img', format: 'skip' }, { selector: 'a', options: { ignoreHref: true } }],
+      }).slice(0, 30_000) : '';
+      const parts = [email.text, html].filter(value => value.trim().length);
+      if (!parts.length && typeof message.snippet === 'string') parts.push(message.snippet.slice(0, 500));
+      let selected = { ...email, text: parts[0] ?? '' };
+      let classification = await this.extraction.classify(selected, false, authenticated);
+      if (parts[1] && parts[1] !== parts[0]) {
+        const alternate = { ...email, text: parts[1] };
+        const alternateResult = await this.extraction.classify(alternate, false, authenticated);
+        if (classification.status === 'ignored' ||
+            (classification.status !== 'registered' && alternateResult.status === 'registered') ||
+            (classification.status === 'pending' && alternateResult.status === 'pending' &&
+              (classification.unconfirmedFields?.length ?? 0) > (alternateResult.unconfirmedFields?.length ?? 0))) {
+          selected = alternate;
+          classification = alternateResult;
+        } else if (classification.status === 'registered' && alternateResult.status === 'registered' &&
+            (['amountMinor', 'currency', 'date', 'direction'] as const).some(key =>
+              classification.status === 'registered' && classification.movement[key] !== alternateResult.movement[key])) {
+          const { movement: _, ...conflicting } = classification;
+          await this.results.save({ source: 'oauth', ...identity, ...conflicting,
+            status: 'pending', reason: 'unconfirmed_extraction', confidence: 0 });
+          return true;
+        }
+      }
+      if (useOpenAi && classification.status === 'pending') classification = await this.extraction.classify(selected, true, authenticated);
       if (useOpenAi || !this.config.N8N_GMAIL_WEBHOOK_URL || classification.status === 'registered' ||
           job.reprocess_id || classification.status === 'ignored') {
         await this.results.save({ source: 'oauth', ...identity, ...classification });
       } else {
-        await this.deliverToN8n(this.config.N8N_GMAIL_WEBHOOK_URL, { ...identity, ...email });
+        await this.deliverToN8n(this.config.N8N_GMAIL_WEBHOOK_URL, { ...identity, ...selected });
       }
     } catch (error) {
       if (isRevoked(error)) {

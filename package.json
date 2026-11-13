@@ -19,6 +19,7 @@
     "argon2": "^0.44.0",
     "google-auth-library": "^11.3.4",
     "helmet": "^8.0.0",
+    "html-to-text": "10.0.1",
     "luxon": "^3.7.0",
     "mailparser": "^3.7.0",
     "nodemailer": "^10.4.0",
@@ -29,6 +30,7 @@
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
+    "@types/html-to-text": "^9.0.4",
     "@types/luxon": "^3.7.0",
     "@types/mailparser": "^3.4.0",
     "@types/node": "^24.0.0",

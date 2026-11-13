@@ -285,7 +285,14 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
   const deposits = 'Bancolombia: Recibiste un pago de nómina por $1,123,450.01 en el producto *7321, el ' + operationDay + ' a las 10:08.';
   const historical: Record<string, string> = {
     'past-qr': rawMessage('Alertas y Notificaciones', 'Bancolombia: Pagaste $35,100.00 por QR el ' + operationDay + ' a las 11:21.', bankAddress, true),
-    'past-payroll': rawMessage('Alertas y Notificaciones', deposits, bankAddress, true),
+    'past-payroll': Buffer.from([
+      'From: <' + bankAddress + '>', 'Subject: Alertas y Notificaciones',
+      'Authentication-Results: mx.google.com; dkim=pass header.d=notificacionesbancolombia.com',
+      'MIME-Version: 1.0', 'Content-Type: multipart/alternative; boundary=alternative', '',
+      '--alternative', 'Content-Type: text/plain; charset=UTF-8', '', 'Consulta la versión HTML del correo.',
+      '--alternative', 'Content-Type: text/html; charset=UTF-8', '', '<table><tr><td><p>' + deposits + '</p></td></tr></table>',
+      '--alternative--', '',
+    ].join('\r\n')).toString('base64url'),
     'past-copy': rawMessage('Alertas y Notificaciones', deposits, bankAddress, true),
     'past-personal': rawMessage('Feliz cumpleaños', 'Hola', shopSender),
     'past-uncertain': rawMessage('Pago recibido', 'Recibimos tu pago de $37.200 el ' + operationDay + '.', shopSender),
