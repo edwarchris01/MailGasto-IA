@@ -428,9 +428,7 @@ export class Gmail {
         'SELECT $1,$2,message_id,$3 FROM candidates WHERE skip IS NOT TRUE ' +
         'ON CONFLICT (mailbox_id,generation,message_id) DO UPDATE SET reprocess_id=excluded.reprocess_id,' +
         'accepted_at=CASE WHEN gmail_deliveries.completed_at IS NOT NULL THEN excluded.accepted_at ELSE gmail_deliveries.accepted_at END,' +
-        'attempts=CASE WHEN gmail_deliveries.completed_at IS NOT NULL THEN 0 ELSE gmail_deliveries.attempts END,' +
-        'attempt_id=CASE WHEN gmail_deliveries.completed_at IS NOT NULL THEN NULL ELSE gmail_deliveries.attempt_id END,' +
-        'due_at=CASE WHEN gmail_deliveries.completed_at IS NOT NULL THEN now() ELSE gmail_deliveries.due_at END,completed_at=NULL ' +
+        'attempts=0,attempt_id=NULL,due_at=now(),completed_at=NULL ' +
         'WHERE gmail_deliveries.reprocess_id IS DISTINCT FROM excluded.reprocess_id',
         [scan.id, scan.generation, scan.run_id, ids, scan.to_at],
       );
@@ -487,14 +485,10 @@ export class Gmail {
         subject: (mime.subject ?? '').slice(0, 1000), text: (mime.text ?? '').replace(/\r\n?/g, '\n').slice(0, 30_000),
       };
       const useOpenAi = bound.rows[0].openai_enabled && Boolean(this.config.OPENAI_API_KEY);
-      const gmailAuthentication = mime.headerLines.find(({ key, line }) =>
-        key === 'authentication-results' && /^authentication-results:\s*mx\.google\.com\s*;/i.test(line));
-      const domain = fromAddress.split('@')[1]?.toLowerCase();
-      const authenticated = Boolean(domain && gmailAuthentication &&
-        /\bdmarc=pass\b[^;]*\bheader\.from=([a-z\d.-]+)/i.exec(gmailAuthentication.line)?.[1]?.toLowerCase() === domain);
+      const authenticated = gmailAuthenticatedSender(mime.headerLines, fromAddress);
       const classification = await this.extraction.classify(email, useOpenAi, authenticated);
       if (useOpenAi || !this.config.N8N_GMAIL_WEBHOOK_URL || classification.status === 'registered' ||
-          (job.reprocess_id && classification.status === 'ignored')) {
+          job.reprocess_id) {
         await this.results.save({ source: 'oauth', ...identity, ...classification });
       } else {
         await this.deliverToN8n(this.config.N8N_GMAIL_WEBHOOK_URL, { ...identity, ...email });
@@ -579,4 +573,20 @@ export class Gmail {
       throw new ServiceUnavailableException('La conexión OAuth de Gmail aún no está configurada.');
     }
   }
+}
+
+function gmailAuthenticatedSender(headers: readonly { key: string; line: string }[], address: string) {
+  const domain = address.split('@')[1]?.toLowerCase();
+  if (!domain) return false;
+  const gmail = headers.find(({ key, line }) => key === 'authentication-results' &&
+    /^authentication-results:\s*mx\.google\.com\s*;/i.test(line));
+  if (!gmail) return false;
+  const from = /\bdmarc=pass\b[^;]*\bheader\.from=([a-z\d.-]+)/i.exec(gmail.line)?.[1]?.toLowerCase();
+  if (from === domain || (from && from.includes('.') && domain.endsWith('.' + from) &&
+      /(?:^|\.)notificacionesbancolombia\.com$/.test(from))) return true;
+  return gmail.line.split(';').some(part => {
+    if (!/\bdkim=pass\b/i.test(part)) return false;
+    const signer = /\bheader\.i=(?:[a-z0-9._%+-]+)?@([a-z\d.-]+)/i.exec(part)?.[1]?.toLowerCase();
+    return signer === domain || (signer === 'notificacionesbancolombia.com' && domain.endsWith('.' + signer));
+  });
 }

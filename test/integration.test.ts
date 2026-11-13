@@ -21,7 +21,8 @@ const ingestKey = 'test-ingest-key-for-local-integration-only';
 const password = 'synthetic-test-password';
 const rawMessage = (subject: string, body: string, sender = 'alertas@nequi.example', authenticated = false) => Buffer.from(
   'From: <' + sender + '>\r\nTo: owner@example.test\r\nSubject: ' + subject +
-  (authenticated ? '\r\nAuthentication-Results: mx.google.com; dmarc=pass header.from=' + sender.split('@')[1] : '') +
+  (authenticated ? '\r\nAuthentication-Results: mx.google.com;\r\n  dkim=pass header.i=@notificacionesbancolombia.com;\r\n  ' +
+    'dmarc=pass header.from=notificacionesbancolombia.com' : '') +
   '\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n' + body,
 ).toString('base64url');
 
@@ -287,6 +288,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
     'past-payroll': rawMessage('Alertas y Notificaciones', deposits, bankAddress, true),
     'past-copy': rawMessage('Alertas y Notificaciones', deposits, bankAddress, true),
     'past-personal': rawMessage('Feliz cumpleaños', 'Hola', shopSender),
+    'past-uncertain': rawMessage('Pago recibido', 'Recibimos tu pago de $37.200 el ' + operationDay + '.', shopSender),
     'outside-month': rawMessage('Alertas y Notificaciones', deposits, bankAddress, true),
   };
   const scanPages: (string | null)[] = [];
@@ -307,7 +309,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       const page = params.get('pageToken');
       scanPages.push(page);
       assert.match(params.get('q') ?? '', new RegExp('^after:' + (Math.floor(month.toSeconds()) - 1) + ' before:\\d+ -in:sent -in:drafts$'));
-      return Response.json(page ? { messages: ['past-copy', 'past-personal', 'outside-month'].map(id => ({ id })) } :
+      return Response.json(page ? { messages: ['past-copy', 'past-personal', 'past-uncertain', 'outside-month'].map(id => ({ id })) } :
         { messages: ['direct', 'past-qr', 'past-payroll'].map(id => ({ id })), nextPageToken: 'second' });
     }
     if (url.includes('gmail.googleapis.com') && url.includes('/messages/')) {
@@ -378,17 +380,22 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       const activeRun = await launch.json();
       assert.deepEqual(await (await request(path, 'POST', undefined, other)).json(), activeRun);
       assert.equal(await gmail.scanReprocessPage(), true);
+      const pendingScan = (await (await request('mailboxes', 'GET', undefined, other)).json())[0].reprocess;
+      assert.equal(pendingScan.scanning, true);
+      assert.equal(pendingScan.queued, 2);
       assert.equal(await gmail.dispatchOne(), true);
       assert.equal(await gmail.dispatchOne(), true);
       assert.equal(await gmail.scanReprocessPage(), true);
-      for (let index = 0; index < 3; index++) assert.equal(await gmail.dispatchOne(), true);
+      const webhooksBefore = deliveries.length;
+      for (let index = 0; index < 4; index++) assert.equal(await gmail.dispatchOne(), true);
       assert.equal(await gmail.dispatchOne(), false);
+      assert.equal(deliveries.length, webhooksBefore);
       assert.equal(await gmail.scanReprocessPage(), false);
       assert.deepEqual(scanPages, [null, 'second']);
       const { reprocess } = (await (await request('mailboxes', 'GET', undefined, other)).json())[0];
       assert.ok(reprocess.finishedAt);
       assert.equal(reprocess.failure, null);
-      assert.deepEqual(reprocess.summary, { registered: 2, pending: 1, ignored: 1, skipped: 2 });
+      assert.deepEqual(reprocess.summary, { registered: 2, pending: 2, ignored: 1, skipped: 2 });
       const notices = await db.query('SELECT n.id,message_id,status,reason,amount_minor,payment_method,transaction_time,direction ' +
         'FROM notices n LEFT JOIN transactions t ON t.notice_id=n.id WHERE n.mailbox_id=$1 ORDER BY message_id', [linked]);
       assert.deepEqual(notices.rows.map(row => [row.message_id, row.status, row.amount_minor, row.payment_method, row.direction]), [
@@ -396,6 +403,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
         ['past-copy', 'pending', null, null, null],
         ['past-payroll', 'registered', '112345001', null, 'income'],
         ['past-qr', 'registered', '3510000', 'QR', 'expense'],
+        ['past-uncertain', 'pending', null, null, null],
       ]);
       assert.equal(notices.rows[0].id, list.items[0].id);
       assert.equal(notices.rows[1].reason, 'possible_duplicate');
@@ -430,7 +438,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       { state: 'disconnected', providerRevoked: true });
     assert.equal((await (await post(renewed)).json()).outcome, 'discarded');
     assert.equal((await db.query('SELECT 1 FROM gmail_deliveries WHERE mailbox_id=$1 AND completed_at IS NULL', [linked])).rowCount, 0);
-    assert.equal((await (await request('notices', 'GET', undefined, other)).json()).items.length, 4);
+    assert.equal((await (await request('notices', 'GET', undefined, other)).json()).items.length, 5);
 
     const mobileOrigin = 'https://mailgasto.example.test';
     const fingerprint = Array(32).fill('AA').join(':');

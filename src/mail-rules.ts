@@ -475,6 +475,11 @@ export function resolveGmailExtraction(notice: GmailNotice, model: ReturnType<ty
   const { date, paymentMethod, cardType, cardLast4, transactionTime, reportedInstitution } = checked;
   const details = { cardType, cardLast4, transactionTime, reportedInstitution };
   if (result.status === 'registered') return { ...result, movement: { ...result.movement, ...details } };
-  if (result.status === 'pending') return { ...result, evidence: { date, paymentMethod, ...details } };
+  if (result.status === 'pending') return { ...result, evidence: {
+    date, paymentMethod, ...details,
+    ...(allowLocalReview ? {
+      amountMinor: checked.money?.amountMinor, currency: checked.money?.currency, direction: checked.direction,
+    } : {}),
+  } };
   return result;
 }

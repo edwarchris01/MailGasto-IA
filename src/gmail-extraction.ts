@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { z } from 'zod';
 import { CONFIG, Config } from './config.js';
 import {
-  bankProviders, candidate, categories, currencies, directions, gmailBankSenders, inspectGmailNotice,
+  bankProviders, candidate, categories, currencies, directions, gmailBankSenders, inspectGmailNotice, normalize,
   openAiNoticeText, readGmailModel, resolveGmailExtraction, SenderMap,
 } from './mail-rules.js';
 
@@ -57,8 +57,13 @@ export class GmailExtraction {
 
     const notice = authenticated ? candidateNotice : { ...candidateNotice, provider: 'other' as const };
     const local = resolveGmailExtraction(notice, null, true);
+    const checked = inspectGmailNotice(notice);
+    if (local.status === 'pending' && !checked.direction && !checked.money && !checked.date &&
+        candidateNotice.provider === 'other' && !/\b(?:recibiste|pagaste|compraste|enviaste|transferiste|abonaron|acreditaron|aprobado|aprobada)\b/.test(normalize(notice.subject))) {
+      return { status: 'ignored' as const };
+    }
     const key = this.config.OPENAI_API_KEY;
-    if (!useOpenAi || !key || local.status !== 'pending' || !inspectGmailNotice(notice).money) {
+    if (!useOpenAi || !key || local.status !== 'pending' || !checked.money) {
       return { provider: notice.provider, forwarded: notice.forwarded, ...local };
     }
 
