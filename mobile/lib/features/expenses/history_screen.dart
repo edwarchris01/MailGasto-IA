@@ -98,6 +98,10 @@ class _NoticeScreenState extends ConsumerState<NoticeScreen> {
     final tone = noticeTone(notice.status);
     final text = Theme.of(context).textTheme;
     final pending = notice.status == 'pending';
+    final date = notice.date ?? notice.reported.date;
+    final method =
+        notice.paymentMethod ??
+        (pending ? notice.reported.paymentMethod : null);
     return ListView(
       padding: screenPadding,
       children: [
@@ -203,16 +207,19 @@ class _NoticeScreenState extends ConsumerState<NoticeScreen> {
           if (notice.direction case 'income' || 'expense')
             ('Tipo', notice.direction == 'income' ? 'Ingreso' : 'Gasto'),
           (
-            'Fecha',
-            notice.date == null ? 'Por confirmar' : shortDay(notice.date!),
+            pending && date != null ? 'Fecha indicada' : 'Fecha',
+            date == null ? 'Por confirmar' : notice.reported.dateLabel(date),
           ),
+          ?notice.reported.separateTime(date),
           (
             'Medio de pago',
-            notice.paymentMethod ??
+            notice.reported.paymentLabel(method) ??
                 (notice.status == 'registered'
                     ? 'Sin especificar'
                     : 'Por confirmar'),
           ),
+          if (notice.reported.institution case final institution?)
+            ('Entidad indicada', institution),
           ('Categoría', categories[notice.category] ?? 'Por confirmar'),
           ('Recibido', syncLabel(notice.receivedAt)),
         ]),

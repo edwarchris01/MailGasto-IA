@@ -5,6 +5,8 @@ export const bankSender = 'alertas@nequi.example';
 export const shopSender = 'avisos@comercio.example';
 export const agavalSubject = 'Pago de ropa';
 export const agaval = 'Tu pago fue procesado, pagaste 50.000 en almacenes Agaval, el 10/11/2026 a las 12:00pm, gracias por tu compra.';
+export const bankPurchaseSubject = 'Alertas y Notificaciones – Compra';
+export const bankPurchase = 'Bancolombia: Compraste $30.750,00 en MERCADO DEL BUENO con tu T.Deb *1234, el 10/11/2026 a las 14:42.';
 export const flow = buildGmailWorkflow({ senderJson: JSON.stringify({ [bankSender]: 'nequi', 'tarjeta@bancolombia.example': 'bancolombia' }) });
 export const goodModel = {
   amountMinor: '2500000', currency: 'COP', date: '2026-11-10', paymentMethod: 'Nequi', description: 'Restaurante Demo',
@@ -14,6 +16,7 @@ export const goodModel = {
 export const agavalMovement = {
   amountMinor: '5000000', currency: 'COP', date: '2026-11-10', paymentMethod: null,
   description: 'Almacenes Agaval', category: 'compras', direction: 'expense',
+  transactionTime: '12:00', cardType: null, cardLast4: null, reportedInstitution: null,
 };
 export const agavalModel = {
   ...agavalMovement, classification: 'completed', categoryEvidence: agavalSubject, confidence: 0.95,

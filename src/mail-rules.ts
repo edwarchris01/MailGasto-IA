@@ -6,7 +6,7 @@ export const bankProviders = ['nequi', 'bancolombia'] as const;
 export const providers = [...bankProviders, 'other'] as const;
 export type Provider = typeof providers[number];
 export type NoticeText = { provider: Provider; forwarded: boolean; text: string };
-export type GmailNotice = Omit<NoticeText, 'text'> & { subject: string; body: string };
+export type GmailNotice = Omit<NoticeText, 'text'> & { subject: string; body: string; payment?: GmailPayment };
 export type SenderMap = Readonly<Record<string, typeof bankProviders[number]>>;
 export const normalize = (text: string) => text.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
 const bareAddress = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
@@ -17,12 +17,20 @@ const notCompleted = /\b(?:(?:pago|compra|transferencia|transaccion|abono) (?:(?
 const expenseEvidence = /\b(?:pagaste|compraste|enviaste|transferiste|retiraste|recibimos tu pago|realizaste un (?:pago|retiro)|te (?:debitaron|cobraron|descontaron)|se (?:te )?(?:debito|cobro)|compra (?:fue )?(?:confirmada|aprobada|realizada|exitosa|procesada|completada)|tu pago (?:fue )?(?:confirmado|aprobado|realizado|exitoso|procesado|completado))\b/;
 const incomeEvidence = /\b(?:recibiste|te (?:enviaron|transfirieron|abonaron|acreditaron|consignaron|reembolsaron)|se (?:te )?(?:abono|acredito|consigno)|(?:transferencia|consignacion|deposito|abono|reembolso|desembolso) (?:fue )?(?:recibid[oa]|acreditad[oa]|abonad[oa])|pago recibido en tu cuenta)\b/;
 const conditional = /\bsi (?:ya )?(?:pagaste|compraste|recibiste|transferiste|enviaste)\b/g;
+const cardLabel = /(?:tarjeta(?:[ \t]+(?:de[ \t]+)?(?:d[eé]bito|cr[eé]dito))?|t[ \t]*\.[ \t]*(?:d[eé]b(?:ito)?|cr[eé]d(?:ito)?))\b/.source;
+const cardNumberPrefix = /[ \t]*\.?[ \t]*(?:(?:terminad[ao][ \t]+en|n[uú]mero|nro\.?|no\.?|de|es)[ \t]+)?[:# \t-]*/.source;
+const cardMask = /[*x×•●](?:[ .\t-]{0,3}[*x×•●]){0,18}[ .\t-]{0,3}/.source;
+const cardDigits = /(?:\d{4}(?:\.\d{4}){2,3}|\d+(?:[ \t-]+\d+)*)(?![\d/:]|[.,]\d)/.source;
+const cardIdentifier = new RegExp('\\b(' + cardLabel + ')' + cardNumberPrefix + '(?:' + cardMask + ')?' + cardDigits, 'gi');
+const maskedIdentifier = new RegExp('(?<![\\p{L}\\d])' + cardMask + cardDigits, 'giu');
 
 export function redact(text: string) {
   return text
     .replace(/https?:\/\/[^\s<>]+|www\.[^\s<>]+/gi, '[enlace]')
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[correo]')
-    .replace(/\b(?:cuenta|tarjeta|documento|referencia|autorizaci[oó]n|c[eé]dula|tel[eé]fono|celular|identificaci[oó]n|terminad[ao] en|c[oó]digo (?:de seguridad|de verificaci[oó]n|OTP))\s*(?:(?:n[uú]mero|no\.?|nro\.?|de|es)\s*)?[:#*xX -]*\d[\d* xX-]*/gi, match => match.replace(/[:#*xX -]*\d[\d* xX-]*$/, ' [identificador] '))
+    .replace(cardIdentifier, '$1 [identificador]')
+    .replace(maskedIdentifier, '[identificador]')
+    .replace(/\b(?:cuenta|documento|referencia|autorizaci[oó]n|c[eé]dula|tel[eé]fono|celular|identificaci[oó]n|terminad[ao] en|c[oó]digo (?:de seguridad|de verificaci[oó]n|OTP))\s*(?:(?:n[uú]mero|no\.?|nro\.?|de|es)\s*)?[:#*xX -]*\d[\d* xX-]*/gi, match => match.replace(/[:#*xX -]*\d[\d* xX-]*$/, ' [identificador] '))
     .replace(/(?<![\d.,])\b(?:\d[ -]?){8,19}\d\b(?![\d.,])/g, '[identificador]')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
 }
@@ -51,12 +59,15 @@ export function candidate(from: string, subject: string, body: string, senders: 
   if (!sender || /^\s*\[MailGasto IA\]/i.test(subject)) return null;
   const domain = '@' + sender.split('@')[1];
   const provider = Object.hasOwn(senders, sender) ? senders[sender] : Object.hasOwn(senders, domain) ? senders[domain] : null;
-  subject = redact(subject.slice(0, 1000)).trim();
-  body = redact(body.split(/\n(?:--\s*$|aviso de confidencialidad|este correo es confidencial)/im, 1)[0].trim())
-    .slice(0, 5000 - subject.length - 1);
+  subject = subject.slice(0, 1000).trim();
+  body = body.split(/\n(?:--\s*$|aviso de confidencialidad|este correo es confidencial)/im, 1)[0].trim();
+  // Look at the mask before redaction, without cutting a longer identifier into a four-digit suffix.
+  const payment = extractGmailPayment(subject, body);
+  subject = redact(subject).trim();
+  body = redact(body).slice(0, 5000 - subject.length - 1);
   const head = normalize(subject + '\n' + body.slice(0, 600));
   if (excluded.test(head) || notCompleted.test(head) || !transactionWords.test(normalize(subject + '\n' + body))) return null;
-  return { provider: provider ?? 'other', forwarded, subject, body };
+  return { provider: provider ?? 'other', forwarded, subject, body, payment };
 }
 
 const moneyPattern = /(?:\b(?:valor(?: de la (?:compra|transacci[oó]n))?|monto|importe|pagaste|compraste|recibiste|enviaste|transferiste|retiraste|por(?: valor de)?)\s*[:=]?\s*)((?:COP|USD|EUR|US\$|[$€])\s*\d[\d.,]*|\d[\d.,]*\s*(?:COP|USD|EUR)\b)/giu;
@@ -117,29 +128,129 @@ function extractGmailMoney(text: string) {
 }
 
 const months = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+const dateText = /(?:\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{1,2} de [a-z]+ de \d{4})/.source;
+const dateMention = new RegExp('\\b' + dateText + '\\b', 'g');
 export function validDay(value: unknown): value is string {
   if (typeof value !== 'string' || !/^(?!0000)\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const date = new Date(value + 'T00:00:00Z');
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
-function extractDate(text: string) {
-  const dates = new Set<string>();
-  for (const match of text.matchAll(/\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{4})\b/g)) {
-    const [d, m, y] = match[0].split(/[/-]/);
-    const date = d.length === 4 ? match[0] : y + '-' + m.padStart(2, '0') + '-' + d.padStart(2, '0');
-    if (validDay(date)) dates.add(date);
+function singleValue<T>(values: Iterable<T>) {
+  const unique = new Set(values);
+  return unique.size === 1 ? [...unique][0] : null;
+}
+
+function findDates(text: string) {
+  const dates = [];
+  for (const match of text.matchAll(dateMention)) {
+    const [day, month, year] = match[0].split(/ de |[/-]/);
+    const monthNumber = /^\d+$/.test(month) ? month : String(months.indexOf(month === 'setiembre' ? 'septiembre' : month) + 1);
+    const date = day.length === 4 ? match[0] : year + '-' + monthNumber.padStart(2, '0') + '-' + day.padStart(2, '0');
+    if (validDay(date)) dates.push({ date, start: match.index, end: match.index + match[0].length });
   }
-  for (const [, d, name, y] of normalize(text).matchAll(/\b(\d{1,2}) de ([a-z]+) de (\d{4})\b/g)) {
-    const month = months.indexOf(name === 'setiembre' ? 'septiembre' : name) + 1;
-    const date = y + '-' + String(month).padStart(2, '0') + '-' + d.padStart(2, '0');
-    if (validDay(date)) dates.add(date);
+  return dates;
+}
+
+export const transactionTimePattern = /^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/;
+const clock = /(\d{1,2}):(\d{2})(?::(\d{2}))?(?:[ \t]*([ap])\.?[ \t]*m\.?)?(?![\w:])/.source;
+const clockAfterDate = new RegExp('^[ \\t]*(?:[,;][ \\t]*)?(?:(?:a las?|hora)[ \\t]*:?[ \\t]*)?' + clock);
+const clockBeforeDate = new RegExp('\\ba las?[ \\t]+' + clock + '[ \\t]*(?:(?:,|del|el|de)[ \\t]*)?$');
+const alternativeClock = new RegExp('^[ \\t]+[oy][ \\t]+a las?[ \\t]+' + clock);
+const clockInField = new RegExp('\\bhora[ \\t]+(?:de[ \\t]+(?:(?:la|el)[ \\t]+)?|del[ \\t]+)' +
+  '(?:compra|operacion|transaccion|pago|movimiento)[ \\t]*[:=][ \\t]*' + clock, 'g');
+const receiptDateContext = /(?:^|[.;\n])[ \t]*(?:(?:correo[ \t]+)?(?:recibid[oa]|enviad[oa])|fecha[ \t]+(?:de[ \t]+)?(?:recepcion|envio|notificacion)(?: del correo)?)[ \t]*[:=,]?[ \t]*(?:el[ \t]+)?$/;
+
+function readClock(match: RegExpMatchArray) {
+  const [, hour, minute, second, period] = match;
+  const value = Number(hour);
+  if (period && (value < 1 || value > 12)) return null;
+  const hours = period ? value % 12 + (period === 'p' ? 12 : 0) : value;
+  const time = String(hours).padStart(2, '0') + ':' + minute + (second ? ':' + second : '');
+  return transactionTimePattern.test(time) ? time : null;
+}
+
+function extractGmailTime(text: string, dates: ReturnType<typeof findDates>, date: string | null) {
+  const matches: RegExpMatchArray[] = [...text.matchAll(clockInField)];
+  if (date) {
+    for (const { start, end } of dates) {
+      const tail = text.slice(end, end + 90);
+      const after = tail.match(clockAfterDate);
+      const before = text.slice(Math.max(0, start - 60), start).match(clockBeforeDate);
+      if (after) {
+        matches.push(after);
+        const alternative = tail.slice(after[0].length).match(alternativeClock);
+        if (alternative) matches.push(alternative);
+      }
+      if (before) matches.push(before);
+    }
   }
-  return dates.size === 1 ? [...dates][0] : null;
+  const times = matches.map(readClock).filter(time => time !== null);
+  if (!singleValue(times.map(time => time.slice(0, 5)))) return null;
+  const precise = times.filter(time => time.length === 8);
+  return singleValue(precise.length ? precise : times);
 }
 
 export const currencies = ['COP', 'USD', 'EUR'] as const;
-export const paymentMethods = ['Nequi', 'Bancolombia', 'Tarjeta'] as const;
+export const paymentMethods = ['Nequi', 'Bancolombia', 'Tarjeta', 'PSE', 'Transferencia'] as const;
+export const cardTypes = ['debit', 'credit'] as const;
+export const cardLast4Pattern = /^\d{4}$/;
+type GmailPayment = {
+  paymentMethod: typeof paymentMethods[number] | null;
+  cardType: typeof cardTypes[number] | null;
+  cardLast4: string | null;
+};
+
+const paymentToken = '(?:' + cardLabel + '|nequi\\b|pse\\b|transferencia\\b)';
+const paymentContext = /\b(?:(?:con|mediante|por|via|usando|a traves de)[ \t]+(?:(?:tu|su|una|la|el)[ \t]+)?|(?:medio|metodo|forma) de pago[ \t]*[:=][ \t]*)/.source;
+const paymentMention = new RegExp('(?:' + paymentContext + '|^[ \\t]*(?=' + cardLabel + '[ \\t]*[:=]))(' + paymentToken + ')', 'gm');
+const nextPayment = new RegExp('^[ \\t]*(?:[,/]|\\b[oy]\\b)[ \\t]*(?:(?:tu|su|una|la|el)[ \\t]+)?(' + paymentToken + ')');
+const cardToken = new RegExp('^' + cardLabel + '$');
+const maskedCardSuffix = new RegExp('^' + cardNumberPrefix + cardMask + '(\\d{4})(?![\\w:/]|[.,]\\d|[ .\\t-]+[\\d*x×•●])');
+const purchaseMerchant = new RegExp('\\b(?:compraste|pagaste)[ \\t]+(?:' + explicitAmount + '|' + numberToken + ')[ \\t]+en[ \\t]+' +
+  '([^\\n]{1,160}?)(?=,?[ \\t]+(?:' + paymentContext + paymentToken + '|el[ \\t]+(?:d[ií]a[ \\t]+)?' + dateText + '\\b))', 'giu');
+
+function extractPurchaseMerchant(body: string) {
+  const names = [...body.matchAll(purchaseMerchant)].map(match => match[1].trim().replace(/,$/, '').trim());
+  return singleValue(names.filter(name => /\p{L}/u.test(name) && !/[.!?]\s/.test(name) && !findDates(normalize(name)).length));
+}
+
+function extractGmailPayment(subject: string, body: string): GmailPayment {
+  const text = normalize(subject + '\n' + body);
+  const methods: NonNullable<GmailPayment['paymentMethod']>[] = [];
+  const types: NonNullable<GmailPayment['cardType']>[] = [];
+  const suffixes: string[] = [];
+  const addMethod = (token: string, tail: string) => {
+    if (!cardToken.test(token)) {
+      methods.push(token === 'nequi' ? 'Nequi' : token === 'pse' ? 'PSE' : 'Transferencia');
+      return 0;
+    }
+    methods.push('Tarjeta');
+    if (/\bdeb/.test(token)) types.push('debit');
+    if (/\bcred/.test(token)) types.push('credit');
+    const mask = maskedCardSuffix.exec(tail);
+    if (mask) suffixes.push(mask[1]);
+    return mask?.[0].length ?? 0;
+  };
+  for (const match of text.matchAll(paymentMention)) {
+    const tail = text.slice(match.index + match[0].length);
+    const following = tail.slice(addMethod(match[1], tail));
+    const second = nextPayment.exec(following);
+    if (second) addMethod(second[1], following.slice(second[0].length));
+  }
+  const paymentMethod = singleValue(methods);
+  return {
+    paymentMethod,
+    cardType: paymentMethod === 'Tarjeta' ? singleValue(types) : null,
+    cardLast4: paymentMethod === 'Tarjeta' ? singleValue(suffixes) : null,
+  };
+}
+
+function extractReportedInstitution(text: string) {
+  const mentions = [...text.matchAll(/^[ \t]*(?:(?:banco|entidad)(?: emisora)?[ \t]*:[ \t]*)?(nequi|bancolombia)\b[ \t]*(?=:|$|te informa\b)/gm)];
+  return singleValue(mentions.flatMap(match => bankProviders.filter(bank => bank === match[1])));
+}
+
 export const directions = ['expense', 'income'] as const;
 export const unconfirmedFields = ['amount', 'currency', 'date', 'direction', 'payment_method'] as const;
 type UnconfirmedField = typeof unconfirmedFields[number];
@@ -202,7 +313,7 @@ function bankMethod(provider: Provider, text: string): typeof paymentMethods[num
 export function inspectNotice(notice: Pick<NoticeText, 'provider' | 'text'>) {
   const text = normalize(notice.text);
   const money = extractMoney(notice.text);
-  const date = extractDate(text);
+  const date = singleValue(findDates(text).map(match => match.date));
   const out = /\b(compra|compraste|pagaste|pago de|realizaste un pago|enviaste|transferiste|retiro|retiraste|debitaron|debito)\b/.test(text);
   const inc = /\b(recibiste|recibida|te enviaron|abonaron|abono|consignacion recibida|deposito recibido)\b/.test(text);
   const direction = movementDirection(out, inc);
@@ -211,17 +322,18 @@ export function inspectNotice(notice: Pick<NoticeText, 'provider' | 'text'>) {
   return { text, money, date, direction, paymentMethod, categoryHint };
 }
 
-export function inspectGmailNotice(notice: Pick<GmailNotice, 'provider' | 'subject' | 'body'>) {
+export function inspectGmailNotice(notice: Pick<GmailNotice, 'subject' | 'body' | 'payment'>) {
   const excerpt = notice.subject + '\n' + notice.body;
   const text = normalize(excerpt);
   const completionText = text.replace(conditional, '');
   const direction = movementDirection(expenseEvidence.test(completionText), incomeEvidence.test(completionText));
-  const methodMentions = [...text.matchAll(/\b(?:(?:con|mediante|via|usando|a traves de) (?:tu |una |la )?|(?:medio|metodo|forma) de pago\s*:\s*)(nequi|bancolombia|tarjeta)\b/g)];
-  const methods = new Set(methodMentions.map(match => match[1]));
-  const statedMethod = methods.size === 1 ? paymentMethods.find(method => methods.has(normalize(method))) ?? null : null;
+  const dates = findDates(text).filter(({ start }) => !receiptDateContext.test(text.slice(Math.max(0, start - 100), start)));
+  const date = singleValue(dates.map(match => match.date));
   return {
-    text, money: extractGmailMoney(excerpt), date: extractDate(text), direction,
-    paymentMethod: notice.provider === 'other' ? statedMethod : bankMethod(notice.provider, text),
+    text, money: extractGmailMoney(excerpt), date, direction,
+    ...(notice.payment ?? extractGmailPayment(notice.subject, notice.body)),
+    transactionTime: extractGmailTime(text, dates, date),
+    reportedInstitution: extractReportedInstitution(text),
   };
 }
 
@@ -229,7 +341,7 @@ function asEvidence(value: string) {
   return normalize(value).replace(/\s+/g, ' ').trim();
 }
 
-function chooseGmailCategory(notice: GmailNotice, model: ReturnType<typeof readGmailModel>): Category {
+function chooseGmailCategory(notice: GmailNotice, model: ReturnType<typeof readGmailModel>, merchant: string | null): Category {
   const bodyCategories = matchingCategories(notice.body);
   if (bodyCategories.length === 1) return bodyCategories[0];
   if (bodyCategories.length > 1) return 'otros';
@@ -239,7 +351,7 @@ function chooseGmailCategory(notice: GmailNotice, model: ReturnType<typeof readG
     const body = asEvidence(notice.body);
     const subject = asEvidence(notice.subject);
     const hints = matchingCategories(evidence);
-    const bareName = evidence === asEvidence(model.description ?? '') || !evidence.includes(' ');
+    const bareName = asEvidence(merchant ?? model.description ?? '').includes(evidence) || !evidence.includes(' ');
     const consistent = hints.length === 1 && hints[0] === model.category;
     if (consistent || hints.length === 0 && !bareName) {
       if (body.includes(evidence)) return model.category;
@@ -250,10 +362,10 @@ function chooseGmailCategory(notice: GmailNotice, model: ReturnType<typeof readG
 }
 
 function resolveChecked(
-  { text, money, date, direction, paymentMethod }: ReturnType<typeof inspectGmailNotice>,
+  { text, money, date, direction, paymentMethod }: Omit<ReturnType<typeof inspectNotice>, 'categoryHint'>,
   model: ReturnType<typeof readModel>,
   category: Category,
-  { technicalFailure = false, requireMethod = true, uncertain = false } = {},
+  { technicalFailure = false, requireMethod = true, uncertain = false, merchant = null as string | null } = {},
 ) {
   const confidence = model?.confidence ?? (technicalFailure && money && date && direction ? 0.75 : 0);
   const fields: UnconfirmedField[] = [];
@@ -275,9 +387,10 @@ function resolveChecked(
   if (uncertain || confidence < 0.7 || fields.length) {
     return { status: 'pending' as const, reason: 'unconfirmed_extraction' as const, confidence, unconfirmedFields: fields };
   }
-  const description = model?.description && asEvidence(text).includes(asEvidence(model.description))
+  const description = model?.description && asEvidence(text).includes(asEvidence(model.description)) &&
+    (!merchant || asEvidence(model.description) === asEvidence(merchant))
     ? redact(model.description)
-    : (direction === 'expense' ? 'Salida de dinero' : 'Ingreso') + (paymentMethod ? ' · ' + paymentMethod : '');
+    : merchant ?? (direction === 'expense' ? 'Salida de dinero' : 'Ingreso') + (paymentMethod ? ' · ' + paymentMethod : '');
   return {
     status: 'registered' as const, confidence,
     movement: {
@@ -304,9 +417,14 @@ export function resolveGmailExtraction(notice: GmailNotice, model: ReturnType<ty
     model = { ...model, classification: 'uncertain' };
   }
   if (model?.classification === 'not_transaction' || notCompleted.test(checked.text)) return { status: 'ignored' as const };
-  const requireMethod = notice.provider !== 'other';
-  if (!model && !requireMethod) return { status: 'error' as const, reason: 'extractor_unavailable' as const, confidence: 0 };
-  return resolveChecked(checked, model, chooseGmailCategory(notice, model), {
-    technicalFailure: !model, requireMethod, uncertain: model?.classification === 'uncertain',
+  if (!model && notice.provider === 'other') return { status: 'error' as const, reason: 'extractor_unavailable' as const, confidence: 0 };
+  const merchant = extractPurchaseMerchant(notice.body);
+  const result = resolveChecked(checked, model, chooseGmailCategory(notice, model, merchant), {
+    technicalFailure: !model, requireMethod: false, uncertain: model?.classification === 'uncertain', merchant,
   });
+  const { date, paymentMethod, cardType, cardLast4, transactionTime, reportedInstitution } = checked;
+  const details = { cardType, cardLast4, transactionTime, reportedInstitution };
+  if (result.status === 'registered') return { ...result, movement: { ...result.movement, ...details } };
+  if (result.status === 'pending') return { ...result, evidence: { date, paymentMethod, ...details } };
+  return result;
 }

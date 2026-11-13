@@ -40,6 +40,7 @@ test('registers confirmed income from a commerce and discards payment requests a
   assert.deepEqual(result.movement, {
     amountMinor: '120000', currency: 'COP', date: '2026-11-10', paymentMethod: 'Nequi',
     description: 'Ingreso · Nequi', category: 'ingresos', direction: 'income',
+    transactionTime: null, cardType: null, cardLast4: null, reportedInstitution: null,
   });
   assert.equal(resolveGmailExtraction(incoming!, null).status, 'error');
   assert.equal(candidate(from, 'Solicitud de pago', 'Paga antes de mañana el saldo de COP 1.200.', senders), null);

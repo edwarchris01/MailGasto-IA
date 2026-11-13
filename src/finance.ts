@@ -56,7 +56,8 @@ type Movement = {
 };
 type EmailOriginal = { amount_minor: string; transaction_date: string; category: string; direction: string };
 type EmailAdjustment = { amount_minor: string | null; transaction_date: string | null; revision: number };
-const fields = 'id,source,notice_id,provider,amount_minor::text, currency, transaction_date::text, payment_method, description, category, direction';
+const fields = 'm.id,m.source,m.notice_id,m.provider,m.amount_minor::text,m.currency,m.transaction_date::text,' +
+  'm.payment_method,m.description,m.category,m.direction';
 const where = 'account_id=$1 AND ($2::date IS NULL OR transaction_date >= $2) ' +
   'AND ($3::date IS NULL OR transaction_date <= $3) AND ($4::text IS NULL OR currency=$4) ' +
   'AND ($5::text IS NULL OR category=$5)';
@@ -95,7 +96,7 @@ export class Finance {
 
   async list(account: string, filter: z.infer<typeof movementFilters>) {
     const { rows } = await this.db.query(
-      'SELECT ' + fields + ' FROM confirmed_movements WHERE ' + where +
+      'SELECT ' + fields + ' FROM confirmed_movements m WHERE ' + where +
       ' AND ($6::text IS NULL OR direction=$6) AND ($7::text IS NULL OR source=$7)' +
       ' ORDER BY transaction_date DESC,id DESC LIMIT $8 OFFSET $9',
       [...filterValues(account, filter), filter.direction ?? null, filter.source ?? null, filter.limit + 1,
@@ -106,12 +107,15 @@ export class Finance {
 
   async detail(account: string, id: string) {
     const { rows: [movement] } = await this.db.query<Movement>(
-      'SELECT ' + fields + ',note,original_amount_minor::text,original_transaction_date::text,correction_revision ' +
-      'FROM confirmed_movements WHERE account_id=$1 AND id=$2', [account, id],
+      'SELECT ' + fields + ',m.note,m.original_amount_minor::text,m.original_transaction_date::text,m.correction_revision,' +
+      'n.reported_transaction_date::text,n.transaction_time,n.reported_institution,' +
+      "CASE WHEN lower(m.payment_method)='tarjeta' THEN n.card_type END AS card_type," +
+      "CASE WHEN lower(m.payment_method)='tarjeta' THEN n.card_last4 END AS card_last4 " +
+      'FROM confirmed_movements m LEFT JOIN notices n ON n.id=m.notice_id WHERE m.account_id=$1 AND m.id=$2', [account, id],
     );
     if (!movement) throw new NotFoundException('Movimiento no encontrado.');
     const { rows: matches } = await this.db.query(
-      'SELECT ' + fields + ' FROM confirmed_movements WHERE account_id=$1 AND source<>$2 AND amount_minor=$3 ' +
+      'SELECT ' + fields + ' FROM confirmed_movements m WHERE account_id=$1 AND source<>$2 AND amount_minor=$3 ' +
       'AND currency=$4 AND transaction_date=$5 AND direction=$6 ORDER BY id LIMIT 25',
       [account, movement.source, movement.amount_minor, movement.currency, movement.transaction_date, movement.direction],
     );

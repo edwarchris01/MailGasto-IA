@@ -58,6 +58,49 @@ class ExpenseRepository {
       api.request('notices/${Uri.encodeComponent(id)}', method: 'DELETE');
 }
 
+class ReportedMovement {
+  ReportedMovement.fromJson(Json row)
+    : date = row['reported_transaction_date'] as String?,
+      time = row['transaction_time'] as String?,
+      paymentMethod = row['reported_payment_method'] as String?,
+      cardType = row['card_type'] as String?,
+      cardLast4 = row['card_last4'] as String?,
+      institution = switch (row['reported_institution']) {
+        'bancolombia' => 'Bancolombia',
+        'nequi' => 'Nequi',
+        _ => null,
+      };
+
+  final String? date, time, paymentMethod, cardType, cardLast4, institution;
+
+  String dateLabel(String effectiveDate) {
+    final clock = time;
+    final day = shortDay(effectiveDate);
+    return clock != null && effectiveDate == date ? '$day · $clock' : day;
+  }
+
+  (String, String)? separateTime(String? effectiveDate) {
+    final clock = time;
+    final reportedDate = date;
+    if (clock == null) return null;
+    if (reportedDate == null) return ('Hora indicada', clock);
+    if (reportedDate == effectiveDate) return null;
+    final day = shortDay(reportedDate);
+    return ('Fecha y hora indicadas', '$day · $clock');
+  }
+
+  String? paymentLabel(String? method) {
+    if (method?.toLowerCase() != 'tarjeta') return method;
+    final label = switch (cardType) {
+      'debit' => 'Tarjeta débito',
+      'credit' => 'Tarjeta crédito',
+      _ => 'Tarjeta',
+    };
+    final suffix = cardLast4;
+    return suffix == null ? label : '$label •••• $suffix';
+  }
+}
+
 class Notice {
   Notice.fromJson(Json row)
     : id = row['id'] as String,
@@ -72,6 +115,7 @@ class Notice {
       paymentMethod = row['payment_method'] as String?,
       category = row['category'] as String?,
       description = row['description'] as String?,
+      reported = ReportedMovement.fromJson(row),
       unconfirmedFields =
           (row['unconfirmed_fields'] as List?)?.cast<String>() ?? const [];
 
@@ -87,7 +131,24 @@ class Notice {
   final String? paymentMethod;
   final String? category;
   final String? description;
+  final ReportedMovement reported;
   final List<String> unconfirmedFields;
+
+  String? get suggestedDate {
+    final value = date ?? reported.date;
+    if (value == null ||
+        unconfirmedFields.contains('date') ||
+        value.compareTo('1900-01-01') < 0 ||
+        value.compareTo(isoDay(bogotaNow())) > 0) {
+      return null;
+    }
+    return value;
+  }
+
+  String? get suggestedPaymentMethod =>
+      unconfirmedFields.contains('payment_method')
+      ? null
+      : paymentMethod ?? reported.paymentMethod;
 
   String get providerLabel => switch (provider) {
     'nequi' => 'Nequi',

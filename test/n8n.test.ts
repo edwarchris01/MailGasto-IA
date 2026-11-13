@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { gmailResult } from '../src/gmail-results.js';
-import { agaval, agavalModel, agavalMovement, agavalSubject, bank, bankSender, filterAndResolve, flow, goodModel,
+import { agaval, agavalModel, agavalMovement, agavalSubject, bank, bankPurchase, bankPurchaseSubject, bankSender, filterAndResolve, flow, goodModel,
   legacyInput, oauthInput, runCode, shopSender, wrap } from './pipeline.fixture.mjs';
 
 test('both Gmail triggers use the same filter and the model receives only a sanitized fragment', () => {
@@ -33,7 +33,69 @@ test('both Gmail triggers use the same filter and the model receives only a sani
   const card = filterAndResolve(legacyInput('card', receivedAt, 'Compraste USD 12.50 con tarjeta 1234 el 10/11/2026.',
     'tarjeta@bancolombia.example', 'Compra con tarjeta'), null);
   assert.equal(card.movement.paymentMethod, 'Tarjeta');
+  assert.equal(card.movement.cardLast4, null);
   assert.equal(card.movement.currency, 'USD');
+});
+
+test('both Gmail paths save the purchase time and masked debit card for the supplied format', () => {
+  const receivedAt = '2026-11-11T16:20:00.000Z';
+  const from = 'persona@example.test';
+  const direct = legacyInput('banco-direct', receivedAt, bankPurchase, 'tarjeta@bancolombia.example', bankPurchaseSubject);
+  const oauth = oauthInput({
+    deliveryId: randomUUID(), attemptId: randomUUID(), messageId: 'banco-oauth', receivedAt,
+    labels: ['INBOX'], from, subject: bankPurchaseSubject, text: bankPurchase,
+  });
+  const model = { ...goodModel, amountMinor: '3075000', description: 'MERCADO DEL BUENO', paymentMethod: 'Bancolombia',
+    category: 'alimentacion', categoryEvidence: 'MERCADO DEL' };
+  for (const [input, provider] of [[direct, 'bancolombia'], [oauth, 'other']] as const) {
+    const result = filterAndResolve(input, model);
+    assert.equal(result.status, 'registered');
+    assert.equal(result.provider, provider);
+    assert.deepEqual(result.movement, {
+      amountMinor: '3075000', currency: 'COP', date: '2026-11-10', transactionTime: '14:42',
+      paymentMethod: 'Tarjeta', cardType: 'debit', cardLast4: '1234', reportedInstitution: 'bancolombia',
+      description: 'MERCADO DEL BUENO', category: 'otros', direction: 'expense',
+    });
+    assert.ok(gmailResult.safeParse(result).success);
+    const { transactionTime, cardType, cardLast4, reportedInstitution, ...legacyMovement } = result.movement;
+    assert.ok(gmailResult.safeParse({ ...result, movement: legacyMovement }).success);
+    assert.ok(!gmailResult.safeParse({ ...result, movement: { ...result.movement, cardLast4: '4111111111111111' } }).success);
+    const [{ json }] = runCode('Filtrar y proteger aviso', input);
+    assert.match(json.notice.body, /T\.Deb \[identificador\]/);
+    assert.doesNotMatch(json.notice.body, /1234/);
+  }
+});
+
+test('optional Gmail details use literal payment and time evidence', () => {
+  const receivedAt = '2026-11-11T16:20:00.000Z';
+  const model = { ...goodModel, amountMinor: '3075000', description: 'MERCADO DEL BUENO', category: 'otros', categoryEvidence: null };
+  const cases = [
+    ['con tu T.Créd. •••• 0068, el 10/11/2026 a las 2:42:08 p. m.', 'Tarjeta', 'credit', '0068', '14:42:08'],
+    ['con tarjeta de débito XXXX-4455, el 10/11/2026 a las 12:04am', 'Tarjeta', 'debit', '4455', '00:04'],
+    ['con tarjeta de crédito 4111 1111 1111 1111, el 10/11/2026 a las 25:01', 'Tarjeta', 'credit', null, null],
+    ['con T.Cred 4111.1111.1111.1111, el 10/11/2026', 'Tarjeta', 'credit', null, null],
+    ['con tu T.Deb **** 1234 5678, el 10/11/2026', 'Tarjeta', 'debit', null, null],
+    ['con PSE, el 10/11/2026. Hora de la transacción: 8:05. Recibido a las 11:20.', 'PSE', null, null, '08:05'],
+    ['mediante transferencia a las 14:42 del 10/11/2026', 'Transferencia', null, null, '14:42'],
+    ['vía Nequi, el 10/11/2026', 'Nequi', null, null, null],
+    ['por PSE o Nequi el 10/11/2026 a las 14:42. Hora de la compra: 15:01.', null, null, null, null],
+    ['con PSE el 10/11/2026 a las 14:42 o a las 14:43', 'PSE', null, null, null],
+    ['con tarjeta débito *1234 o tarjeta crédito *9876, el 10/11/2026', 'Tarjeta', null, null, null],
+    ['el 10/11/2026. Recibido el 11/11/2026 a las 11:20. Cuenta *9999.', null, null, null, null],
+  ] as const;
+  for (const [tail, method, subtype, suffix, time] of cases) {
+    const input = legacyInput('bank-variant', receivedAt, 'Compraste $30.750,00 en MERCADO DEL BUENO ' + tail,
+      shopSender, bankPurchaseSubject);
+    const result = filterAndResolve(input, model);
+    assert.equal(result.status, 'registered', tail);
+    assert.deepEqual(
+      [result.movement.paymentMethod, result.movement.cardType, result.movement.cardLast4, result.movement.transactionTime],
+      [method, subtype, suffix, time], tail,
+    );
+    assert.ok(gmailResult.safeParse(result).success, tail);
+    const [{ json }] = runCode('Filtrar y proteger aviso', input);
+    assert.doesNotMatch(json.notice.body, /0068|4455|4111|1111|1234|5678|9876|9999/, tail);
+  }
 });
 
 test('Gmail direct retains its retry ID until NestJS confirms, including HTTP failures', () => {
@@ -65,6 +127,9 @@ test('registers Agaval as Compras through Gmail direct and OAuth with no invente
     assert.deepEqual(result.movement, agavalMovement);
     assert.ok(gmailResult.safeParse(result).success);
   }
+  const receiptWithoutTime = legacyInput('agaval-without-time', receivedAt, agaval.replace(' a las 12:00pm', ''), shopSender, agavalSubject);
+  assert.deepEqual(filterAndResolve(receiptWithoutTime, { ...agavalModel, description: 'Pago de ropa en Agaval' }).movement,
+    { ...agavalMovement, description: 'almacenes Agaval', transactionTime: null });
   assert.equal(filterAndResolve(direct, null).status, 'error');
   const subjectOnly = legacyInput('subject-only', receivedAt, '', shopSender, agavalSubject);
   assert.equal(filterAndResolve(subjectOnly, agavalModel).status, 'pending');

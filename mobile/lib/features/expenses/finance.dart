@@ -82,6 +82,7 @@ class Movement {
       method = row['payment_method'] as String?,
       description = row['description'] as String?,
       provider = row['provider'] as String?,
+      reported = ReportedMovement.fromJson(row),
       emailDetails = row['correction_revision'] == null
           ? null
           : EmailMovementDetails.fromJson(row),
@@ -94,6 +95,7 @@ class Movement {
   final String? method, description, provider;
   final bool income;
   final BigInt minor;
+  final ReportedMovement reported;
   final EmailMovementDetails? emailDetails;
   final List<Movement> matches;
 

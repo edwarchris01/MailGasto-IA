@@ -27,6 +27,8 @@ El webhook de Gmail acepta `deliveryId`, `attemptId`, `messageId`, `receivedAt`,
 
 El callback devuelve `registered`, `pending`, `error` o `ignored`. La rama OAuth conserva `deliveryId` y `attemptId`; la rama directa usa el buzón configurado con `LEGACY_GMAIL_ADDRESS` y envía `startedAt`. El resultado contiene la identidad del mensaje, proveedor, confianza y movimiento cuando aplica, sin texto del correo. Los montos viajan como cadenas de centavos. `ignored` solo cierra las entregas OAuth. NestJS responde `200` tras guardar, detectar un duplicado, cerrar un correo descartado o rechazar un resultado obsoleto. Los fallos de guardado conservan la entrega pendiente.
 
+Los avisos nuevos pueden incluir la hora de la operación, el tipo de tarjeta, su terminación enmascarada y la entidad indicada. El resultado registrado los incluye como campos opcionales del movimiento. En avisos pendientes se conservan en `evidence` junto con la fecha y el medio detectados. Despliega la migración y NestJS antes de publicar el flujo de Gmail actualizado en n8n. Publica después la versión de Flutter que muestra esos campos.
+
 El historial mantiene los estados `processing` (cola previa), `registered`, `pending` y `error`. Los resúmenes y el chat siguen en `/v1/summary` y `/v1/chat/sessions`. Para una solicitud de eliminación recibida por el canal de soporte, verifica el remitente contra el correo registrado y envía `email` al endpoint interno; el titular confirma desde su sesión.
 
 ## Puesta en servicio en el servidor de n8n

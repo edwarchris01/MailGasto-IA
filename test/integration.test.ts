@@ -11,7 +11,7 @@ import { Database } from '../src/db.js';
 import { Gmail } from '../src/gmail.js';
 import { createApp } from '../src/main.js';
 import { Worker } from '../src/worker.js';
-import { agaval, agavalModel, agavalSubject, bank, bankSender, filterAndResolve, goodModel, legacyInput,
+import { agaval, agavalModel, agavalSubject, bank, bankPurchase, bankPurchaseSubject, bankSender, filterAndResolve, goodModel, legacyInput,
   oauthInput, shopSender } from './pipeline.fixture.mjs';
 
 const connection = process.env.MAILGASTO_TEST_DATABASE_URL;
@@ -134,7 +134,8 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
   assert.equal(forwarded.forwarded, true);
   assert.equal((await (await post(forwarded)).json()).outcome, 'stored');
   assert.equal(filterAndResolve(legacyInput('ignored', simulatedArrival, 'Hola', otherEmail, 'Feliz cumpleaños')), undefined);
-  const pending = filterAndResolve(legacyInput('pending', simulatedArrival, bank + ' Monto COP 50.000.'));
+  const pending = filterAndResolve(legacyInput('pending', simulatedArrival, bankPurchase + ' Monto COP 50.000.',
+    bankSender, bankPurchaseSubject));
   assert.equal(pending.status, 'pending');
   assert.equal((await (await post(pending)).json()).outcome, 'stored');
   const unavailable = filterAndResolve(legacyInput('technical', simulatedArrival, 'Pagaste en Restaurante Demo.'), null);
@@ -155,6 +156,11 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
   const pendingDetail = await (await request('notices/' + pendingList[0].id, 'GET', undefined, owner)).json();
   assert.deepEqual(pendingDetail.unconfirmed_fields, ['amount']);
   assert.equal(pendingDetail.reason, 'missing_or_ambiguous_fields');
+  assert.deepEqual(
+    [pendingDetail.reported_transaction_date, pendingDetail.transaction_time, pendingDetail.reported_payment_method,
+      pendingDetail.card_type, pendingDetail.card_last4, pendingDetail.reported_institution],
+    ['2026-11-10', '14:42', 'Tarjeta', 'debit', '1234', 'bancolombia'],
+  );
   const registered = (await (await request('notices?status=registered&limit=1', 'GET', undefined, owner)).json()).items;
   assert.equal(registered.length, 1);
   assert.equal((await request('notices/' + registered[0].id, 'GET', undefined, other)).status, 404);
@@ -224,6 +230,10 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
   assert.equal((await discard(pendingPath)).status, 409);
   const reviewed = await (await request('movements/' + movement.id, 'GET', undefined, owner)).json();
   assert.deepEqual([reviewed.source, reviewed.notice_id, reviewed.amount_minor], ['email', pendingDetail.id, review.amountMinor]);
+  assert.deepEqual(
+    [reviewed.transaction_date, reviewed.reported_transaction_date, reviewed.transaction_time, reviewed.card_type, reviewed.card_last4],
+    [review.date, '2026-11-10', '14:42', null, null],
+  );
   const reviewReport = await (await request(
     'analytics?from=' + review.date + '&to=' + review.date + '&currency=COP', 'GET', undefined, owner,
   )).json();

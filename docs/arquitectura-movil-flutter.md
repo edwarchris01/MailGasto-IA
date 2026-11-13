@@ -65,7 +65,7 @@ En cada cambio Flutter, instalar el APK y recorrer en Android el flujo afectado.
 
 ### E2E con n8n y Ollama
 
-Esta prueba usa NestJS, n8n, Ollama, PostgreSQL y Mailpit reales. Solo sustituye las respuestas externas de Google y Gmail por un buzón con avisos sintéticos. El worker consulta ese buzón y usa el webhook del workflow generado; la prueba no inserta avisos ni movimientos en PostgreSQL. Verifica el monto y la moneda, la ausencia de duplicados, el descarte de correo personal, que un importe ambiguo no se registre, las notificaciones SMTP y la respuesta de Ollama. Después, Flutter consulta el mismo backend en el teléfono.
+Esta prueba usa NestJS, n8n, Ollama, PostgreSQL y Mailpit reales. Solo sustituye las respuestas externas de Google y Gmail por un buzón con avisos sintéticos. Entrega los avisos de uno en uno por el webhook del flujo generado, sin insertar avisos ni movimientos en PostgreSQL. Verifica monto, moneda, hora de compra, tarjeta enmascarada, avisos sin esos datos, deduplicación, notificaciones SMTP y la respuesta de Ollama. Flutter consulta el mismo backend en el teléfono.
 
 Desde la raíz, con `.env` apuntando al PostgreSQL local, prepara servicios exclusivos para la prueba:
 
@@ -74,13 +74,12 @@ docker compose -p mailgasto-ia-dev -f compose.yaml -f compose.dev.yaml up -d db 
 docker compose -p mailgasto-ia-dev -f compose.yaml -f compose.dev.yaml exec -T db createdb -U mailgasto mailgasto_mobile_e2e
 docker network create mailgasto-e2e
 docker run -d --name mailgasto-e2e-n8n --network mailgasto-e2e -p 127.0.0.1:5679:5678 n8nio/n8n:2.47.3
-docker run -d --name mailgasto-e2e-ollama --network mailgasto-e2e --network-alias ollama -v mailgasto-e2e-ollama-models:/root/.ollama ollama/ollama:0.24.0
-docker exec mailgasto-e2e-ollama ollama pull qwen3:0.6b
-$env:MAILGASTO_E2E_MODEL = 'qwen3:0.6b'
+docker run -d --name mailgasto-e2e-ollama --network mailgasto-e2e --network-alias ollama -v mailgasto-e2e-ollama-models:/root/.ollama ollama/ollama:latest
+docker exec mailgasto-e2e-ollama ollama pull qwen3.5:4b
 node --env-file=.env --import tsx test/n8n-mobile-e2e.ts
 ```
 
-El script importa y publica los flujos en ese contenedor local, genera sus claves de prueba y deja la API escuchando en `localhost:3116`. Para probar con el modelo de producción, usa una versión de Ollama compatible con `qwen3.5:4b`, descarga ese modelo y omite `MAILGASTO_E2E_MODEL`.
+El script importa y publica los flujos en ese contenedor local, genera sus claves de prueba y deja la API escuchando en `localhost:3116`. Usa `qwen3.5:4b` de forma predeterminada. `MAILGASTO_E2E_MODEL` permite probar otro modelo ya descargado en Ollama.
 
 Cuando el script indique `TEST_GMAIL_E2E_EMAIL`, conserva el proceso abierto y ejecuta desde `mobile/` con el serial físico:
 

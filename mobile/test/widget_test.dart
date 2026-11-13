@@ -9,6 +9,7 @@ import 'package:mailgasto/features/auth/auth.dart';
 import 'package:mailgasto/features/expenses/expenses.dart';
 import 'package:mailgasto/features/expenses/movements_screen.dart';
 import 'package:mailgasto/main.dart';
+import 'package:timezone/data/latest.dart' as tz;
 
 class _Guest extends AuthViewModel {
   @override
@@ -71,6 +72,7 @@ void main() {
 
   testWidgets('La confirmación precarga los datos del aviso', (tester) async {
     await initializeDateFormatting('es_CO');
+    tz.initializeTimeZones();
     final notice = Notice.fromJson({
       'id': 'pending',
       'provider': 'other',
@@ -78,7 +80,8 @@ void main() {
       'received_at': '2026-11-10T15:00:00Z',
       'amount_minor': '1250',
       'currency': 'USD',
-      'transaction_date': '2026-11-10',
+      'reported_transaction_date': '2025-11-10',
+      'reported_payment_method': 'Tarjeta',
       'direction': 'expense',
       'category': 'compras',
     });
@@ -100,7 +103,8 @@ void main() {
           .selected,
       'expense',
     );
-    expect(find.text('10 nov 2026'), findsOneWidget);
+    expect(find.text('10 nov 2025'), findsOneWidget);
+    expect(find.text('Tarjeta'), findsOneWidget);
     final selectors = tester.widgetList<DropdownButtonFormField<String>>(
       find.byType(DropdownButtonFormField<String>),
     );

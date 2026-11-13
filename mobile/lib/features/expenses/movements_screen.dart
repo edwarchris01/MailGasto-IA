@@ -621,6 +621,10 @@ class _MovementDetailState extends ConsumerState<_MovementDetail> {
   Widget build(BuildContext context) {
     final item = widget.item;
     final details = item.emailDetails;
+    final timeOnOriginalDate =
+        details != null &&
+        details.originalDate != item.date &&
+        details.originalDate == item.reported.date;
     final tone = item.income ? AppTone.income : AppTone.expense;
     final text = Theme.of(context).textTheme;
     return Scaffold(
@@ -664,14 +668,27 @@ class _MovementDetailState extends ConsumerState<_MovementDetail> {
           ),
           const SizedBox(height: 10),
           DetailFields([
-            ('Fecha', shortDay(item.date)),
+            ('Fecha', item.reported.dateLabel(item.date)),
+            ?(timeOnOriginalDate
+                ? null
+                : item.reported.separateTime(item.date)),
             ('Categoría', categories[item.category] ?? item.category),
-            ('Medio de pago', item.method ?? 'Sin especificar'),
+            (
+              'Medio de pago',
+              item.reported.paymentLabel(item.method) ?? 'Sin especificar',
+            ),
+            if (item.reported.institution case final institution?)
+              ('Entidad indicada', institution),
             ('Origen', movementSources[item.source] ?? item.source),
             if (details?.note case final note?) ('Nota', note),
             if (details != null && details.revision > 0) ...[
               ('Monto original', money(details.originalMinor, item.currency)),
-              ('Fecha original', shortDay(details.originalDate)),
+              (
+                'Fecha original',
+                timeOnOriginalDate
+                    ? item.reported.dateLabel(details.originalDate)
+                    : shortDay(details.originalDate),
+              ),
             ],
           ]),
           if (item.manual) ...[
@@ -867,7 +884,7 @@ class _MovementFormState extends ConsumerState<MovementForm> {
     final notice = widget.notice;
     final minor = existing?.minor ?? notice?.minor;
     if (minor != null) _amount.text = money(minor, '').trim();
-    _method.text = existing?.method ?? notice?.paymentMethod ?? '';
+    _method.text = existing?.method ?? notice?.suggestedPaymentMethod ?? '';
     _description.text = existing?.description ?? notice?.description ?? '';
     if (notice != null) {
       _currency = currencies.containsKey(notice.currency)
@@ -875,7 +892,7 @@ class _MovementFormState extends ConsumerState<MovementForm> {
           : null;
       _direction = notice.direction;
       _category = notice.category == 'ingresos' ? null : notice.category;
-      _date = notice.date;
+      _date = notice.suggestedDate;
     } else {
       _currency =
           existing?.currency ??

@@ -4,19 +4,35 @@ import { z } from 'zod';
 import { queueMail } from './accounts.js';
 import { CONFIG, Config } from './config.js';
 import { Database } from './db.js';
-import { amountPattern, categories, currencies, directions, paymentMethods, providers, redact, unconfirmedFields } from './mail-rules.js';
+import { amountPattern, bankProviders, cardLast4Pattern, cardTypes, categories, currencies, directions,
+  paymentMethods, providers, redact, transactionTimePattern, unconfirmedFields } from './mail-rules.js';
 
 export const messageIdPattern = /^[A-Za-z0-9_-]{1,200}$/;
 const timestamp = z.iso.datetime({ offset: true });
+const day = z.iso.date().refine(value => !value.startsWith('0000'));
+const paymentMethod = z.enum(paymentMethods).nullable();
+const optionalDetails = {
+  transactionTime: z.string().regex(transactionTimePattern).nullish(),
+  cardType: z.enum(cardTypes).nullish(),
+  cardLast4: z.string().regex(cardLast4Pattern).nullish(),
+  reportedInstitution: z.enum(bankProviders).nullish(),
+};
+type PaymentDetails = { paymentMethod: z.infer<typeof paymentMethod> } & {
+  cardType?: string | null; cardLast4?: string | null;
+};
+const consistentCard = (details: PaymentDetails) =>
+  details.paymentMethod === 'Tarjeta' || (details.cardType == null && details.cardLast4 == null);
+const pendingEvidence = z.strictObject({ date: day.nullable(), paymentMethod, ...optionalDetails }).refine(consistentCard);
 const movement = z.strictObject({
   amountMinor: z.string().regex(amountPattern),
   currency: z.enum(currencies),
-  date: z.iso.date().refine(value => !value.startsWith('0000')),
-  paymentMethod: z.enum(paymentMethods).nullable(),
+  date: day,
+  paymentMethod,
   description: z.string().trim().min(1).max(160),
   category: z.enum(categories),
   direction: z.enum(directions),
-}).refine(value => (value.direction === 'income') === (value.category === 'ingresos'));
+  ...optionalDetails,
+}).refine(consistentCard).refine(value => (value.direction === 'income') === (value.category === 'ingresos'));
 const identity = {
   source: z.enum(['legacy', 'oauth']),
   messageId: z.string().regex(messageIdPattern),
@@ -33,13 +49,13 @@ export const gmailResult = z.discriminatedUnion('status', [
   z.strictObject({ ...notice, status: z.literal('registered'), confidence: z.number().min(0.7).max(1), movement }),
   z.strictObject({ ...notice, status: z.literal('pending'), confidence: z.number().min(0).max(1),
     reason: z.enum(['missing_or_ambiguous_fields', 'unconfirmed_extraction', 'unverified_sender']),
-    unconfirmedFields: z.array(z.enum(unconfirmedFields)).max(unconfirmedFields.length).optional() }),
+    unconfirmedFields: z.array(z.enum(unconfirmedFields)).max(unconfirmedFields.length).optional(),
+    evidence: pendingEvidence.optional() }),
   z.strictObject({ ...notice, status: z.literal('error'), confidence: z.literal(0), reason: z.literal('extractor_unavailable') }),
 ]).refine(value => (value.source === 'oauth'
   ? value.deliveryId !== undefined && value.attemptId !== undefined && value.startedAt === undefined
   : value.deliveryId === undefined && value.attemptId === undefined && value.startedAt !== undefined && value.status !== 'ignored') &&
-  (value.status !== 'pending' || value.reason !== 'unverified_sender' || value.provider === 'other') &&
-  (value.status !== 'registered' || value.provider === 'other' || value.movement.paymentMethod !== null));
+  (value.status !== 'pending' || value.reason !== 'unverified_sender' || value.provider === 'other'));
 
 type Result = z.infer<typeof gmailResult>;
 type Mailbox = { id: string; account_id: string; state: string; generation: string; linked_at: Date; source: string };
@@ -78,13 +94,17 @@ export class GmailResults {
       }
       let outcome = 'ignored';
       if (result.status !== 'ignored') {
+        const evidence = result.status === 'registered' ? result.movement : result.status === 'pending' ? result.evidence : undefined;
         const { rows: [saved] } = await client.query<{ id: string }>(
-          'INSERT INTO notices (mailbox_id,message_id,received_at,provider,forwarded,status,reason,confidence,accepted_at,completed_at,unconfirmed_fields) ' +
-          'VALUES ($1,$2,$3,$4,$5,$6,$7,$8,LEAST($9,clock_timestamp()),clock_timestamp(),$10) ' +
+          'INSERT INTO notices (mailbox_id,message_id,received_at,provider,forwarded,status,reason,confidence,accepted_at,completed_at,unconfirmed_fields,' +
+          'reported_transaction_date,transaction_time,reported_payment_method,card_type,card_last4,reported_institution) ' +
+          'VALUES ($1,$2,$3,$4,$5,$6,$7,$8,LEAST($9,clock_timestamp()),clock_timestamp(),$10,$11,$12,$13,$14,$15,$16) ' +
           'ON CONFLICT (mailbox_id,message_id) DO NOTHING RETURNING id',
           [mailbox.id, result.messageId, received, result.provider, result.forwarded, result.status,
             'reason' in result ? result.reason : null, result.confidence, accepted,
-            result.status === 'pending' ? result.unconfirmedFields ?? null : null],
+            result.status === 'pending' ? result.unconfirmedFields ?? null : null,
+            evidence?.date ?? null, evidence?.transactionTime ?? null, evidence?.paymentMethod ?? null,
+            evidence?.cardType ?? null, evidence?.cardLast4 ?? null, evidence?.reportedInstitution ?? null],
         );
         if (saved) await saveNoticeEffects(client, this.config, mailbox.account_id, saved.id, result, result.provider);
         outcome = saved ? 'stored' : 'duplicate';

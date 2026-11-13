@@ -7,10 +7,13 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DateTime } from 'luxon';
 import { buildGmailWorkflow } from '../n8n/gmail-workflow.mjs';
+import { Agent } from '../src/agent.js';
 import { readConfig } from '../src/config.js';
 import { Database } from '../src/db.js';
+import { Gmail } from '../src/gmail.js';
 import { createApp } from '../src/main.js';
-import { agaval, agavalSubject, shopSender } from './pipeline.fixture.mjs';
+import { Worker } from '../src/worker.js';
+import { agaval, agavalSubject, bankPurchase, bankPurchaseSubject, shopSender } from './pipeline.fixture.mjs';
 
 const apiOrigin = 'http://localhost:3116';
 const n8n = 'http://127.0.0.1:5679/webhook';
@@ -111,8 +114,9 @@ async function main() {
   provisionN8n();
   const networkFetch = globalThis.fetch;
   const messages = {
+    ['card-' + run]: bankPurchase.replace('10/11/2026', today.toFormat('dd/MM/yyyy')),
     [`registered-${run}`]: `Pagaste COP 25 en Restaurante QA el ${date} con Nequi. Cuenta 12345678901.`,
-    [`other-${run}`]: agaval.replace('10/11/2026', today.toFormat('dd/MM/yyyy')),
+    [`other-${run}`]: agaval.replace('10/11/2026', today.toFormat('dd/MM/yyyy')).replace(' a las 12:00pm', ''),
     [`pending-${run}`]: `Pagaste COP 13.000 y transferiste COP 14.000 el ${date}.`,
     [`ignored-${run}`]: 'Hola, mensaje personal de prueba.',
   };
@@ -144,19 +148,22 @@ async function main() {
       assert(Object.hasOwn(messages, id));
       const isIgnored = id.startsWith('ignored-');
       const isShop = id.startsWith('other-');
-      const from = isIgnored ? 'persona@example.test' : isShop ? shopSender : sender;
+      const isCard = id.startsWith('card-');
+      const from = isIgnored || isCard ? 'persona@example.test' : isShop ? shopSender : sender;
       const raw = `From: ${from}\r\nTo: ${email}\r\n` +
-        `Subject: ${isIgnored ? 'Saludos' : isShop ? agavalSubject : 'Aviso de pago'}\r\nMIME-Version: 1.0\r\n` +
+        `Subject: ${isIgnored ? 'Saludos' : isShop ? agavalSubject : isCard ? bankPurchaseSubject : 'Aviso de pago'}\r\nMIME-Version: 1.0\r\n` +
         `Content-Type: text/plain; charset=UTF-8\r\n\r\n${messages[id]}`;
       return Response.json({ id, raw: Buffer.from(raw).toString('base64url'), internalDate: String(receivedAt), labelIds: ['INBOX'] });
     }
     return networkFetch(resource, options);
   };
-  const app = await createApp(config);
+  const app = await createApp(config, false);
+  const db = app.get(Database);
+  const gmail = app.get(Gmail);
+  const worker = new Worker(db, config, gmail, app.get(Agent));
   try {
     app.enableShutdownHooks();
     await app.listen(config.PORT, '127.0.0.1');
-    const db = app.get(Database);
     const request = (path: string, data?: object, cookie?: string) => fetch(apiOrigin + '/v1/' + path, {
       method: data === undefined ? 'GET' : 'POST', redirect: 'manual', signal: AbortSignal.timeout(8000),
       headers: { Origin: apiOrigin, 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) },
@@ -168,6 +175,7 @@ async function main() {
       if (response && [401, 403].includes(response.status)) return true;
     });
     assert.equal((await request('auth/register', { name: 'Gmail QA', email, password })).status, 202);
+    assert.equal(await worker.sendOne(), true);
     const verification = await waitFor('correo de verificación en Mailpit', async () => {
       const response = await fetch(mailpit + '/api/v1/search?query=' + encodeURIComponent(`to:${email}`));
       const search = await response.json();
@@ -185,28 +193,53 @@ async function main() {
     const link = new URL((await authorized.json()).url);
     oauthChallenge = link.searchParams.get('code_challenge');
     assert.equal((await request(`mailboxes/gmail/callback?code=synthetic-grant&state=${link.searchParams.get('state')}`, undefined, cookie)).status, 303);
-    const deliveries = await waitFor('cuatro entregas cerradas por el webhook de n8n', async () => {
-      const { rows } = await db.query(
-        'SELECT d.message_id, n.status, n.provider, n.reason, t.amount_minor, t.currency, t.category, ' +
-        't.payment_method, t.direction, t.description, d.attempts FROM gmail_deliveries d ' +
-        'JOIN mailboxes m ON m.id=d.mailbox_id LEFT JOIN notices n ON n.mailbox_id=m.id AND n.message_id=d.message_id ' +
-        'LEFT JOIN transactions t ON t.notice_id=n.id WHERE m.email=$1 AND d.completed_at IS NOT NULL ORDER BY d.message_id', [email],
-      );
-      return rows.length === 4 ? rows : undefined;
-    }, 180);
-    const [ignored, other, ambiguous, registered] = deliveries;
+    assert.equal(await gmail.pollOne(), true);
+    // Give each webhook its own time with the local Ollama runner.
+    for (let expected = 1; expected <= Object.keys(messages).length; expected++) {
+      assert.equal(await gmail.dispatchOne(), true);
+      await waitFor('entrega ' + expected + ' cerrada por el webhook de n8n', async () => {
+        const { rows: [row] } = await db.query<{ count: number }>(
+          'SELECT count(*)::int FROM gmail_deliveries d JOIN mailboxes m ON m.id=d.mailbox_id ' +
+          'WHERE m.email=$1 AND d.completed_at IS NOT NULL', [email],
+        );
+        return row.count === expected ? row.count : undefined;
+      }, 160);
+    }
+    const { rows: deliveries } = await db.query(
+      'SELECT d.message_id,n.status,n.provider,n.reason,t.id,t.amount_minor,t.currency,t.category,' +
+      'n.transaction_time,n.card_type,n.card_last4,n.reported_institution,' +
+      't.payment_method,t.direction,t.description,d.attempts FROM gmail_deliveries d ' +
+      'JOIN mailboxes m ON m.id=d.mailbox_id LEFT JOIN notices n ON n.mailbox_id=m.id AND n.message_id=d.message_id ' +
+      'LEFT JOIN transactions t ON t.notice_id=n.id WHERE m.email=$1 AND d.completed_at IS NOT NULL ORDER BY d.message_id', [email],
+    );
+    const [card, ignored, other, ambiguous, registered] = deliveries;
+    assert.deepEqual(
+      [card.status, card.provider, card.amount_minor, card.currency, card.category, card.payment_method, card.description,
+        card.transaction_time, card.card_type, card.card_last4, card.reported_institution],
+      ['registered', 'other', '3075000', 'COP', 'otros', 'Tarjeta', 'MERCADO DEL BUENO', '14:42', 'debit', '1234', 'bancolombia'],
+    );
+    const cardDetail = await (await request('movements/' + card.id, undefined, cookie)).json();
+    assert.deepEqual(
+      [cardDetail.transaction_date, cardDetail.reported_transaction_date, cardDetail.transaction_time, cardDetail.card_type,
+        cardDetail.card_last4, cardDetail.reported_institution],
+      [date, date, '14:42', 'debit', '1234', 'bancolombia'],
+    );
     assert.equal(ignored.status, null);
     assert.deepEqual([other.status, other.provider, other.amount_minor, other.currency, other.category, other.payment_method, other.direction],
       ['registered', 'other', '5000000', 'COP', 'compras', null, 'expense']);
     assert.match(other.description, /agaval/i);
+    assert.equal(other.transaction_time, null);
     assert(['pending', 'error'].includes(ambiguous.status), 'Un aviso ambiguo no debe registrarse');
     assert.equal(ambiguous.amount_minor, null);
     assert.deepEqual([registered.status, registered.amount_minor, registered.currency], ['registered', '2500', 'COP']);
     assert(deliveries.every(row => row.attempts === 1), 'Cada mensaje debe cerrarse en un solo intento');
+    while (await worker.sendOne()) {
+      // Flush the synthetic outbox before checking the SMTP deliveries.
+    }
     const mailCount = await waitFor('notificaciones SMTP para aviso registrado y pendiente', async () => {
       const { rows } = await db.query("SELECT o.subject FROM outbox o JOIN accounts a ON a.id=o.account_id " +
         "WHERE a.email=$1 AND o.status='sent' ORDER BY o.subject", [email]);
-      if (rows.length === (ambiguous.status === 'pending' ? 4 : 3)) return rows.map(row => row.subject);
+      if (rows.length === (ambiguous.status === 'pending' ? 5 : 4)) return rows.map(row => row.subject);
     });
     assert(mailCount.some(subject => subject.includes('Movimiento registrado')));
     if (ambiguous.status === 'pending') assert(mailCount.some(subject => subject.includes('Aviso pendiente')));
@@ -218,11 +251,13 @@ async function main() {
     assert.equal(response.status, 200);
     const result = await response.json();
     assert.equal(result.result?.action, 'summary', 'Ollama debe responder a través del webhook real de n8n');
-    console.info(`PostgreSQL: Agaval en Compras por COP 50.000, movimiento bancario por COP 25, 1 aviso ${ambiguous.status} y 1 descartado. SMTP y Ollama verificados.`);
+    console.info('PostgreSQL y API: débito •••• 1234 a las 14:42, Agaval sin hora ni medio, y aviso ' + ambiguous.status + '. SMTP y Ollama verificados.');
     console.info(`API Android: ${apiOrigin} · TEST_GMAIL_E2E_EMAIL=${email}`);
   } catch (error) {
     await app.close();
     throw error;
+  } finally {
+    await worker.onApplicationShutdown();
   }
 }
 

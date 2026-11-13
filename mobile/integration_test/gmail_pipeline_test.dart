@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
+import 'package:mailgasto/core/format.dart';
 import 'package:mailgasto/main.dart' as app;
 
 const _origin = String.fromEnvironment('API_BASE_URL');
@@ -47,9 +48,35 @@ void main() {
         'synthetic-gmail-e2e-password',
       );
       await tap(find.widgetWithText(FilledButton, 'Iniciar sesión'));
-      await waitFor(find.text(r'$50.025'));
+      await waitFor(find.text(r'$80.775'));
 
       await tap(tab('Movimientos'));
+      await tap(find.text('MERCADO DEL BUENO'));
+      await waitFor(find.text('Detalle del movimiento'));
+      final today = bogotaNow();
+      final day = shortDay(isoDay(today));
+      await waitFor(find.text('$day · 14:42'));
+      await waitFor(find.text('Tarjeta débito •••• 1234'));
+      await waitFor(find.text('Entidad indicada'));
+      await waitFor(find.text('Bancolombia'));
+
+      await tap(find.text('Corregir datos'));
+      await tap(find.byKey(const ValueKey('movement-date')));
+      final dialog = find.byType(DatePickerDialog);
+      final labels = MaterialLocalizations.of(tester.element(dialog));
+      await tap(find.byTooltip(labels.inputDateModeButtonLabel));
+      final correctedDate = DateTime(today.year, today.month, today.day - 1);
+      await tester.enterText(
+        find.descendant(of: dialog, matching: find.byType(TextFormField)),
+        labels.formatCompactDate(correctedDate),
+      );
+      await tap(find.text(labels.okButtonLabel));
+      await tap(find.text('Guardar cambios'));
+      await waitFor(find.text(shortDay(isoDay(correctedDate))));
+      await waitFor(find.text('Fecha original'));
+      await waitFor(find.text('$day · 14:42'));
+      await tap(find.byType(BackButton));
+
       await tap(find.text('Categoría'));
       await tap(find.text('Compras'));
       final movement = find.text(r'− $50.000');
@@ -63,6 +90,8 @@ void main() {
       );
       await waitFor(find.text('Compras'));
       await waitFor(find.text('Sin especificar'));
+      await waitFor(find.text(day));
+      expect(find.text('Entidad indicada'), findsNothing);
       await tap(find.byType(BackButton));
 
       await tap(tab('Análisis'));
