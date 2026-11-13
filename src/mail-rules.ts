@@ -20,7 +20,7 @@ const notCompleted = /\b(?:(?:pago|compra|transferencia|transaccion|abono) (?:(?
 const expenseEvidence = /\b(?:pagaste|compraste|enviaste|transferiste|retiraste|recibimos tu pago|realizaste un (?:pago|retiro)|te (?:debitaron|cobraron|descontaron)|se (?:te )?(?:debito|cobro)|compra (?:fue )?(?:confirmada|aprobada|realizada|exitosa|procesada|completada)|tu pago (?:fue )?(?:confirmado|aprobado|realizado|exitoso|procesado|completado))\b/;
 const incomeEvidence = /\b(?:recibiste|te (?:enviaron|transfirieron|abonaron|acreditaron|consignaron|reembolsaron)|se (?:te )?(?:abono|acredito|consigno)|(?:transferencia|consignacion|deposito|abono|reembolso|desembolso) (?:fue )?(?:recibid[oa]|acreditad[oa]|abonad[oa])|pago recibido en tu cuenta)\b/;
 const conditional = /\bsi (?:ya )?(?:pagaste|compraste|recibiste|transferiste|enviaste)\b/g;
-const gmailSecurityFooter = /(?:\bpor tu seguridad\b|\bprotege tus datos\b|\bsi tienes dudas[, ]+(?:ll[aá]manos|hablemos|encu[eé]ntranos)\b|\beste es un (?:correo|mensaje) autom[aá]tico\b|\beste es una notificaci[oó]n autom[aá]tica\b|\baviso de confidencialidad\b)/i;
+const gmailSecurityFooter = /(?:\bpor tu seguridad\b|\bprotege tus datos\b|\bsi tienes dudas[, \t\n]+(?:ll[aá]manos|hablemos|encu[eé]ntranos)\b|\beste es un (?:correo|mensaje) autom[aá]tico\b|\best[ea] es una notificaci[oó]n autom[aá]tica\b|\b(?:bancolombia|nequi) nunca (?:te|le) solicitar[aá]\b|\baviso de confidencialidad\b)/i;
 const cardLabel = /(?:tarjeta(?:[ \t]+(?:de[ \t]+)?(?:d[eé]bito|cr[eé]dito))?|t[ \t]*\.[ \t]*(?:d[eé]b(?:ito)?|cr[eé]d(?:ito)?))\b/.source;
 const cardNumberPrefix = /[ \t]*\.?[ \t]*(?:(?:terminad[ao][ \t]+en|n[uú]mero|nro\.?|no\.?|de|es)[ \t]+)?[:# \t-]*/.source;
 const cardMask = /[*x×•●](?:[ .\t-]{0,3}[*x×•●]){0,18}[ .\t-]{0,3}/.source;
@@ -218,8 +218,9 @@ const cardToken = new RegExp('^' + cardLabel + '$');
 const maskedCardSuffix = new RegExp('^' + cardNumberPrefix + cardMask + '(\\d{4})(?![\\w:/]|[.,]\\d|[ .\\t-]+[\\d*x×•●])');
 const purchaseMerchant = new RegExp('\\b(?:compraste|pagaste)[ \\t]+(?:' + explicitAmount + '|' + numberToken + ')[ \\t]+en[ \\t]+' +
   '([^\\n]{1,160}?)(?=,?[ \\t]+(?:' + paymentContext + paymentToken + '|el[ \\t]+(?:d[ií]a[ \\t]+)?' + dateText + '\\b))', 'giu');
-const buttonMerchant = new RegExp('\\bpagaste\\s+(?:' + explicitAmount + '|' + numberToken +
-  ')\\s+a\\s+([^\\n]{1,160}?)(?=\\s+(?:desde (?:tu |el |la )?(?:cuenta|producto)|con (?:el )?bot[oó]n|el\\s+' + dateText + '\\b))', 'giu');
+const buttonMerchant = new RegExp('\\b(?:pagaste|transferiste)\\s+(?:' + explicitAmount + '|' + numberToken +
+  ')(?:\\s+(?:con|por|mediante)\\s+(?:el\\s+)?bot[oó]n\\s+bancolombia)?' +
+  '\\s+a\\s+([^\\n]{1,160}?)(?=\\s+(?:desde (?:tu |el |la )?(?:cuenta|producto)|con (?:el )?bot[oó]n|el\\s+' + dateText + '\\b))', 'giu');
 
 function extractPurchaseMerchant(body: string) {
   const names = [...body.matchAll(purchaseMerchant), ...body.matchAll(buttonMerchant)]
@@ -273,6 +274,7 @@ export function openAiNoticeText(notice: Pick<GmailNotice, 'subject' | 'body'>) 
   const body = notice.body.replace(/^[ \t]*(?:hola|estimad[oa]|apreciad[oa]|señor(?:a)?|cliente)\b[^\n]*(?:\n|$)/gim,
     line => transactionWords.test(normalize(line)) ? line : '');
   const minimize = (text: string) => redact(text)
+    .replace(/(\b(?:bancolombia|nequi):)[ \t]+[^:\n]{2,100}?(?=\s+(?:pagaste|compraste|recibiste|enviaste|transferiste|retiraste)\b)/giu, '$1 [titular]')
     .replace(/\b(?:llave(?: de pago)?|producto|cuenta|id de transacci[oó]n|n[uú]mero de transacci[oó]n)\s*[:#*xX -]*\d[\d* xX-]*/gi,
       '[identificador]')
     .replace(/\b(\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2} de \p{L}+ de \d{4})\b|\b(\d{1,2}:\d{2}(?::\d{2})?)\b|(?:COP|USD|EUR|US\$|[$€])\s*\d[\d.,]*|\b\d[\d.,]*\s*(?:COP|USD|EUR)\b|\b\d{4,}\b/giu,

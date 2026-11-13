@@ -29,7 +29,7 @@ async function google<T>(url: string, options: RequestInit = {}): Promise<T> {
 
 type Profile = { emailAddress: string; historyId: string };
 type RawMessage = { id: string; raw: string; internalDate: string; labelIds?: string[] };
-type Tokens = { access_token: string; refresh_token?: string; scope?: string };
+type Tokens = { access_token: string; refresh_token?: string; scope?: string; expires_in?: number };
 type History = { historyId: string; nextPageToken?: string; history?: { messagesAdded?: { message: { id: string } }[] }[] };
 type Messages = { messages?: { id: string }[]; nextPageToken?: string };
 type OAuthState = { verifier: string; expected_mailbox: string | null };
@@ -43,11 +43,14 @@ type Mailbox = {
 type Job = Mailbox & { delivery_id: string; message_id: string; attempts: number; reprocess_id: string | null;
   from_at: Date | null; to_at: Date | null };
 type Scan = Mailbox & { run_id: string; from_at: Date; to_at: Date; page_token: string | null; scan_attempts: number };
+type Access = { token: string; expiresAt: number };
 const isRevoked = (error: unknown) => error instanceof GoogleError && (error.code === 'invalid_grant' || error.status === 401);
 const messageIds = (ids: string[]) => [...new Set(ids.filter(id => typeof id === 'string' && messageIdPattern.test(id)))];
 
 @Injectable()
 export class Gmail {
+  private readonly accessTokens = new Map<string, { generation: string; access: Promise<Access> }>();
+
   constructor(
     @Inject(Database) private readonly db: Database, @Inject(CONFIG) private readonly config: Config,
     @Inject(GmailExtraction) private readonly extraction: GmailExtraction,
@@ -59,9 +62,14 @@ export class Gmail {
       'SELECT m.id,m.email,m.source,m.state,m.linked_at,m.last_synced_at,m.openai_consented_at IS NOT NULL AS openai_enabled,' +
       "($2::boolean AND m.source='oauth') AS openai_available," +
       'CASE WHEN r.id IS NOT NULL THEN jsonb_build_object(' +
-      "'from',r.from_at,'to',r.to_at,'finishedAt',r.finished_at,'failure',r.failure,'summary',r.summary) END AS reprocess " +
+      "'from',r.from_at,'to',r.to_at,'finishedAt',r.finished_at,'failure',r.failure,'summary',COALESCE(r.summary,s.summary)," +
+      "'scanning',r.scan_finished_at IS NULL,'queued',q.total,'retrying',q.attempted) END AS reprocess " +
       'FROM mailboxes m LEFT JOIN LATERAL (SELECT * FROM gmail_reprocess_runs ' +
       'WHERE mailbox_id=m.id ORDER BY started_at DESC LIMIT 1) r ON true ' +
+      'LEFT JOIN LATERAL (SELECT jsonb_object_agg(outcome,total) AS summary FROM (' +
+      'SELECT outcome,count(*)::int AS total FROM gmail_reprocess_results WHERE run_id=r.id GROUP BY outcome) totals) s ON r.finished_at IS NULL ' +
+      'LEFT JOIN LATERAL (SELECT count(*)::int AS total,count(*) FILTER (WHERE attempts>0)::int AS attempted ' +
+      'FROM gmail_deliveries WHERE reprocess_id=r.id AND completed_at IS NULL) q ON r.finished_at IS NULL ' +
       'WHERE m.account_id=$1 ORDER BY m.linked_at DESC',
       [accountId, Boolean(this.config.OPENAI_API_KEY)],
     );
@@ -259,6 +267,7 @@ export class Gmail {
       );
       return row;
     });
+    this.accessTokens.delete(id);
     if (mailbox.secret) {
       const params = new URLSearchParams({ token: decrypt(mailbox.secret, this.config.encryptionKey) });
       const result = await fetch('https://oauth2.googleapis.com/revoke', {
@@ -288,6 +297,7 @@ export class Gmail {
       );
     } catch (error) {
       const revoked = isRevoked(error);
+      if (revoked) this.accessTokens.delete(mailbox.id);
       await this.db.query(
         "UPDATE mailboxes SET state=CASE WHEN $3 THEN 'reconnect' ELSE state END,sync_due_at=now()+interval '1 minute'," +
         'sync_lease=NULL WHERE id=$1 AND sync_lease=$2', [mailbox.id, lease, revoked],
@@ -380,6 +390,7 @@ export class Gmail {
     } catch (error) {
       const revoked = isRevoked(error);
       if (revoked) {
+        this.accessTokens.delete(scan.id);
         await this.db.query("UPDATE mailboxes SET state='reconnect',sync_lease=NULL WHERE id=$1 AND generation=$2 AND state='active'",
           [scan.id, scan.generation]);
       }
@@ -490,6 +501,7 @@ export class Gmail {
       }
     } catch (error) {
       if (isRevoked(error)) {
+        this.accessTokens.delete(job.id);
         await this.db.query("UPDATE mailboxes SET state='reconnect',sync_lease=NULL WHERE id=$1 AND generation=$2 AND state='active'",
           [job.id, job.generation]);
       } else if (error instanceof GoogleError && error.status === 404) {
@@ -497,7 +509,8 @@ export class Gmail {
       } else if (job.reprocess_id && job.attempts >= maxReprocessAttempts) {
         await this.closeDelivery(job, attemptId, 'error');
       } else {
-        const delay = Math.min(900, 180 * 2 ** Math.min(job.attempts - 1, 3));
+        const delay = job.reprocess_id ? Math.min(120, 20 * 2 ** Math.min(job.attempts - 1, 3)) :
+          Math.min(900, 180 * 2 ** Math.min(job.attempts - 1, 3));
         await this.db.query('UPDATE gmail_deliveries SET due_at=now()+make_interval(secs=>$3::double precision) ' +
           'WHERE id=$1 AND attempt_id=$2 AND completed_at IS NULL', [job.delivery_id, attemptId, delay]);
         if (job.attempts === 1 || job.attempts % 10 === 0) console.warn('Gmail delivery will retry');
@@ -520,11 +533,24 @@ export class Gmail {
     return this.db.transaction(client => finishGmailDelivery(client, job.delivery_id, attemptId, outcome));
   }
 
-  private async accessToken(mailbox: Mailbox) {
-    const tokens = await this.exchange({
+  private async accessToken(mailbox: Mailbox): Promise<string> {
+    const cached = this.accessTokens.get(mailbox.id);
+    if (cached?.generation === mailbox.generation) {
+      const access = await cached.access;
+      if (access.expiresAt > Date.now()) return access.token;
+      if (this.accessTokens.get(mailbox.id) !== cached) return this.accessToken(mailbox);
+    }
+    const access = this.exchange({
       grant_type: 'refresh_token', refresh_token: decrypt(mailbox.secret!, this.config.encryptionKey),
+    }).then(tokens => ({
+      token: tokens.access_token,
+      expiresAt: Date.now() + Math.max(0, (tokens.expires_in ?? 0) - 60) * 1000,
+    })).catch(error => {
+      if (this.accessTokens.get(mailbox.id)?.access === access) this.accessTokens.delete(mailbox.id);
+      throw error;
     });
-    return tokens.access_token;
+    this.accessTokens.set(mailbox.id, { generation: mailbox.generation, access });
+    return (await access).token;
   }
 
   private async find(accountId: string, id: string) {

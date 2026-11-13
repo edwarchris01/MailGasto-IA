@@ -26,13 +26,25 @@ class ReprocessStatus {
   ReprocessStatus(Json row)
     : finishedAt = row['finishedAt'] as String?,
       failure = row['failure'] as String?,
-      summary = row['summary'] as Json? ?? const {};
+      summary = row['summary'] as Json? ?? const {},
+      scanning = row['scanning'] as bool? ?? true,
+      queued = row['queued'] as int? ?? 0,
+      retrying = row['retrying'] as int? ?? 0;
 
   final String? finishedAt, failure;
   final Json summary;
+  final bool scanning;
+  final int queued, retrying;
 
   bool get running => finishedAt == null;
   int count(String key) => summary[key] as int? ?? 0;
+  int get reviewed => [
+    'registered',
+    'pending',
+    'ignored',
+    'error',
+    'skipped',
+  ].fold(0, (sum, key) => sum + count(key));
 }
 
 final mailboxRepositoryProvider = Provider((ref) {
@@ -530,11 +542,15 @@ class _ReprocessResult extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (result.running) {
-      return const AppNotice(
+      return AppNotice(
         icon: Icons.sync_rounded,
         title: 'Revisando correos del mes',
-        description:
-            'Puedes salir de esta pantalla mientras se revisan los avisos.',
+        description: [
+          '${result.reviewed} revisados · ${result.queued} en cola',
+          if (result.scanning) 'Buscando correos en Gmail.',
+          if (result.retrying > 0)
+            '${result.retrying} esperando confirmación o reintento.',
+        ].join('\n'),
       );
     }
     final failure = switch (result.failure) {

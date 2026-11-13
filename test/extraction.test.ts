@@ -118,7 +118,7 @@ test('uses rules for authenticated Bancolombia formats and sends only a protecte
   const formats = [
     ['Recibiste un pago de nómina por $1,257,483.12 en el producto *1234, el 13/11/2026 a las 10:08.',
       '125748312', 'income', null, '10:08', 'Pago de nómina'],
-    ['Pagaste $218,700.00 a TELEFONIA DEMO S.A. desde el producto *1234 con el Botón Bancolombia el 13/11/2026 a las 10:46:22.',
+    ['Transferiste $218,700.00 por Boton Bancolombia a TELEFONIA DEMO S.A. desde producto *1234. 13/11/2026 10:46:22 ¿Dudas? 018000555555. Este es una notificación automática.',
       '21870000', 'expense', 'Botón Bancolombia', '10:46:22', 'TELEFONIA DEMO S.A.'],
     ['Pagaste $25,000.00 por QR el 13/11/2026 a las 11:21.', '2500000', 'expense', 'QR', '11:21', 'Salida de dinero · QR'],
     ['Compraste $270,779.00 en TIENDA DEMO con tu T.Deb *1234, el 13/11/2026 a las 11:46.',
