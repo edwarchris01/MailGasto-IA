@@ -1,7 +1,7 @@
 // Builds importable workflows and the SDK payload for the remote draft.
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { buildGmailWorkflow, gmailOperations, gmailSdk } from './gmail-workflow.mjs';
+import { buildGmailWorkflow, gmailOperations, gmailSdk, gmailUpdateDefinition } from './gmail-workflow.mjs';
 import { categories } from '../src/mail-rules.ts';
 
 const ollama = { id: '84doF8LS0JZLF1T4', name: 'Ollama account 2' };
@@ -101,22 +101,28 @@ function sdk(workflow, branches) {
 }
 
 const selection = process.argv[2] ?? 'agent';
-const intake = () => buildGmailWorkflow({ tableId: process.env.MAILGASTO_N8N_TABLE_ID });
-function intakeOperations() {
+const intake = classifier => buildGmailWorkflow({ tableId: process.env.MAILGASTO_N8N_TABLE_ID, classifier });
+function updateIntake(operations) {
+  if (!process.argv[3]) throw Error('Pass an export of the target MailGasto intake workflow.');
   const current = JSON.parse(readFileSync(process.argv[3], 'utf8'));
   const parameters = name => current.nodes.find(node => node.name === name)?.parameters;
   const table = parameters('Guardar ID para reintento')?.dataTableId;
   const senderJson = parameters('Filtrar y proteger aviso')?.jsCode?.match(/^const senders = (.+);$/m)?.[1];
-  return gmailOperations(buildGmailWorkflow({
+  const next = buildGmailWorkflow({
     tableId: process.env.MAILGASTO_N8N_TABLE_ID || (['id', 'list'].includes(table?.mode) ? table.value : undefined),
     senderJson: process.env.BANK_SENDERS_JSON ?? senderJson,
     resultUrl: process.env.MAILGASTO_RESULTS_URL || parameters('Entregar resultado a NestJS')?.url,
-  }), current);
+  });
+  return operations ? gmailOperations(next, current) : gmailUpdateDefinition(next, current);
 }
 const output = {
   agent: () => agent, sdk: () => sdk(agent, [extract, intent]), intake,
+  'intake-chain': () => intake('chain'),
   'intake-sdk': () => gmailSdk(intake()),
-  'intake-operations': intakeOperations,
+  'intake-update': () => updateIntake(false),
+  'intake-operations': () => updateIntake(true),
 }[selection]?.();
-if (output === undefined) throw Error('Use agent, sdk, intake, intake-sdk, or intake-operations <current-workflow.json>');
+if (output === undefined) {
+  throw Error('Use agent, sdk, intake, intake-chain, intake-sdk, intake-update <current-workflow.json> or intake-operations <current-workflow.json>');
+}
 process.stdout.write(typeof output === 'string' ? output : JSON.stringify(output));

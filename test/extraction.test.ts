@@ -4,7 +4,7 @@ import { readConfig } from '../src/config.js';
 import { candidate, resolveExtraction } from '../src/extraction.js';
 import { GmailExtraction } from '../src/gmail-extraction.js';
 import { localIntent } from '../src/history.js';
-import { gmailBankSenders, readGmailModel, resolveGmailExtraction } from '../src/mail-rules.js';
+import { gmailBankSenders, gmailForwarded, readGmailModel, resolveGmailExtraction } from '../src/mail-rules.js';
 
 const senders = { 'alertas@nequi.example': 'nequi', '@bancolombia.example': 'bancolombia' } as const;
 const sample = 'Pagaste COP 25.000 en Restaurante Demo el 10/11/2026.';
@@ -17,7 +17,8 @@ const notice = { provider: 'nequi', forwarded: false, text: sample } as const;
 test('recognizes notices and identifiable forwards and removes sensitive material', () => {
   const secret = ' cuenta 12345678901, cliente@demo.example, https://demo.example/historial';
   assert.equal(candidate('bad@evil.example', 'Compra', sample, senders)?.provider, 'other');
-  assert.equal(candidate('alertas@nequi.example', 'Promoción de pagos', sample, senders), null);
+  assert.equal(resolveGmailExtraction(candidate('alertas@nequi.example', 'Promoción de pagos', sample, senders)!, null).status,
+    'pending');
   assert.equal(candidate('alertas@nequi.example', 'Aviso',
     'Tu código de seguridad para la transacción es 123456.', senders), null);
   assert.equal(candidate('alertas@nequi.example', '[MailGasto IA] Aviso pendiente', sample, senders), null);
@@ -30,23 +31,28 @@ test('recognizes notices and identifiable forwards and removes sensitive materia
   assert.equal(forwarded?.subject, 'Compra');
   assert.match(forwarded?.body ?? '', /25\.000/);
   assert.doesNotMatch(forwarded?.body ?? '', /Nota personal|12345678901|@demo|https:/);
+  assert.equal(gmailForwarded('Fwd: Aviso de compra', sample), true);
 });
 
-test('registers confirmed income from a commerce and discards payment requests and failures', () => {
+test('does not turn a bare transfer into income and distinguishes a payment failure from a conflict', () => {
   const from = 'avisos@comercio.example';
-  const incoming = candidate(from, 'Transferencia recibida', 'Te abonaron 1.200 el 10/11/2026 con Nequi.', senders);
+  const incoming = candidate(from, 'Transferencia recibida', 'Te abonaron COP 1.200 el 10/11/2026 con Nequi.', senders, true);
   assert.equal(incoming?.provider, 'other');
-  const model = readGmailModel({ ...valid, classification: 'completed', amountMinor: '120000', direction: 'income' });
-  const result = resolveGmailExtraction(incoming!, model);
-  assert.equal(result.status, 'registered');
-  assert.deepEqual(result.movement, {
-    amountMinor: '120000', currency: 'COP', date: '2026-11-10', paymentMethod: 'Nequi',
-    description: 'Ingreso · Nequi', category: 'ingresos', direction: 'income',
-    transactionTime: null, cardType: null, cardLast4: null, reportedInstitution: null,
+  const model = readGmailModel({
+    classification: 'completed', amountMinor: '120000', currency: 'COP', date: '2026-11-10', direction: 'income',
+    description: null, category: 'ingresos', paymentMethod: 'Nequi', movementKind: 'transfer', counterpartyRole: null,
+    evidence: { classification: 'Te abonaron', amountMinor: 'COP 1.200', currency: 'COP', date: '10/11/2026',
+      direction: 'Te abonaron', description: null, category: null, movementKind: 'Te abonaron' },
   });
-  assert.equal(resolveGmailExtraction(incoming!, null).status, 'error');
+  assert.ok(model);
+  const result = resolveGmailExtraction(incoming!, model);
+  assert.equal(result.status, 'pending');
+  assert.equal(result.evidence?.amountMinor, '120000');
+  assert.equal(result.evidence?.direction, 'income');
+  assert.equal(resolveGmailExtraction(incoming!, null).status, 'pending');
   assert.equal(candidate(from, 'Solicitud de pago', 'Paga antes de mañana el saldo de COP 1.200.', senders), null);
-  assert.equal(candidate(from, 'Pago cancelado', 'La compra aprobada por COP 1.200 fue cancelada.', senders), null);
+  const conflict = candidate(from, 'Pago cancelado', 'La compra aprobada por COP 1.200 fue cancelada.', senders);
+  assert.equal(resolveGmailExtraction(conflict!, null).status, 'pending');
   assert.equal(candidate(from, 'Pago de ropa', 'Tu pago no pudo ser procesado.', senders), null);
   const incomplete = candidate(from, 'Compra aprobada', 'Compraste un plan.', senders);
   assert.equal(resolveGmailExtraction(incomplete!, model).status, 'pending');
@@ -109,7 +115,10 @@ test('uses rules for authenticated Bancolombia formats and sends only a protecte
     status: 'completed',
     output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify({
       classification: 'completed', amountMinor: '2500000', currency: 'COP', date: '2026-11-13',
-      description: null, category: 'ingresos', categoryEvidence: null, direction: 'income', confidence: 0.98,
+      description: null, category: 'ingresos', direction: 'income', paymentMethod: null, movementKind: 'transfer', counterpartyRole: 'payer',
+      evidence: { classification: 'Recibiste una transferencia', amountMinor: '$25.000', currency: '$25.000',
+        date: '13 de noviembre de 2026', direction: 'Recibiste una transferencia', description: null, category: null,
+        movementKind: 'Recibiste una transferencia' },
     }) }] }],
   }));
   const sender = Object.keys(gmailBankSenders)[0];
@@ -144,7 +153,7 @@ test('uses rules for authenticated Bancolombia formats and sends only a protecte
   assert.equal((await service.classify({ ...payment, from: sender }, false, false)).status, 'pending');
   assert.equal((await service.classify(payment, false, true)).status, 'pending');
   assert.equal(mock.mock.callCount(), 0);
-  assert.equal((await service.classify(payment, true, true)).status, 'registered');
+  assert.equal((await service.classify(payment, true, true)).status, 'pending');
   assert.equal(mock.mock.callCount(), 1);
   const [url, init] = mock.mock.calls[0].arguments as unknown as [string, RequestInit];
   assert.equal(url, 'https://api.openai.com/v1/responses');

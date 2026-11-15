@@ -1,13 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
-import { convert } from 'html-to-text';
 import { DateTime } from 'luxon';
-import { simpleParser } from 'mailparser';
 import { CONFIG, Config, decrypt, encrypt, hash, token } from './config.js';
 import { Database } from './db.js';
 import { timezone } from './extraction.js';
 import { GmailExtraction } from './gmail-extraction.js';
-import { finishGmailDelivery, GmailResults, messageIdPattern } from './gmail-results.js';
+import { readGmailMime } from './gmail-mime.js';
+import { finishGmailDelivery, GmailResults, gmailDeliveryRetryDelay, logGmailDelivery,
+  maxGmailDeliveryAttempts, messageIdPattern } from './gmail-results.js';
+import { gmailForwarded, isGmailExplicitNonMovement } from './mail-rules.js';
 
 const gmailScope = 'https://www.googleapis.com/auth/gmail.readonly';
 const gmailRoot = 'https://gmail.googleapis.com/gmail/v1/users/me/';
@@ -19,6 +20,10 @@ class GoogleError extends Error {
   constructor(readonly status: number, readonly code?: string) {
     super('Google request failed');
   }
+}
+
+class GmailWebhookError extends Error {
+  constructor(readonly reason: string, readonly terminal = false) { super(reason); }
 }
 
 async function google<T>(url: string, options: RequestInit = {}): Promise<T> {
@@ -42,7 +47,8 @@ type Mailbox = {
   openai_consented_at: Date | null;
 };
 type Job = Mailbox & { delivery_id: string; message_id: string; attempts: number; reprocess_id: string | null;
-  from_at: Date | null; to_at: Date | null };
+  from_at: Date | null; to_at: Date | null; previous_attempts: number;
+  previous_webhook_accepted_at: Date | null; previous_retry_requested_at: Date | null };
 type Scan = Mailbox & { run_id: string; from_at: Date; to_at: Date; page_token: string | null; scan_attempts: number };
 type Access = { token: string; expiresAt: number };
 const isRevoked = (error: unknown) => error instanceof GoogleError && (error.code === 'invalid_grant' || error.status === 401);
@@ -242,7 +248,8 @@ export class Gmail {
       );
       if (!saved) throw new ConflictException('El buzón ya está asociado a otra cuenta.');
       await client.query(
-        'UPDATE gmail_deliveries SET generation=$2,attempt_id=NULL,received_at=NULL,attempts=0,due_at=now() ' +
+        'UPDATE gmail_deliveries SET generation=$2,attempt_id=NULL,received_at=NULL,authenticated=NULL,forwarded=NULL,' +
+        'webhook_accepted_at=NULL,retry_requested_at=NULL,attempts=0,due_at=now() ' +
         'WHERE mailbox_id=$1 AND generation<>$2 AND completed_at IS NULL', [saved.id, saved.generation],
       );
     });
@@ -432,7 +439,8 @@ export class Gmail {
         'SELECT $1,$2,message_id,$3 FROM candidates WHERE skip IS NOT TRUE ' +
         'ON CONFLICT (mailbox_id,generation,message_id) DO UPDATE SET reprocess_id=excluded.reprocess_id,' +
         'accepted_at=CASE WHEN gmail_deliveries.completed_at IS NOT NULL THEN excluded.accepted_at ELSE gmail_deliveries.accepted_at END,' +
-        'attempts=0,attempt_id=NULL,due_at=now(),completed_at=NULL ' +
+        'attempts=0,attempt_id=NULL,authenticated=NULL,forwarded=NULL,webhook_accepted_at=NULL,retry_requested_at=NULL,' +
+        'due_at=now(),completed_at=NULL ' +
         'WHERE gmail_deliveries.reprocess_id IS DISTINCT FROM excluded.reprocess_id',
         [scan.id, scan.generation, scan.run_id, ids, scan.to_at],
       );
@@ -442,19 +450,31 @@ export class Gmail {
   async dispatchOne() {
     if (!this.config.GOOGLE_CLIENT_ID || !this.config.GOOGLE_CLIENT_SECRET) return false;
     const attemptId = randomUUID();
+    const startedAt = new Date();
     const { rows: [job] } = await this.db.query<Job>(
-      'WITH claim AS (UPDATE gmail_deliveries SET attempt_id=$1,attempts=attempts+1,received_at=NULL,' +
-      "due_at=now()+interval '3 minutes' WHERE id=(SELECT d.id FROM gmail_deliveries d JOIN mailboxes m ON m.id=d.mailbox_id " +
+      'WITH next AS (SELECT d.id,d.attempts,d.webhook_accepted_at,d.retry_requested_at ' +
+      'FROM gmail_deliveries d JOIN mailboxes m ON m.id=d.mailbox_id ' +
       "WHERE d.completed_at IS NULL AND d.due_at<=now() AND m.state='active' AND m.source='oauth' AND m.generation=d.generation " +
-      'ORDER BY d.due_at FOR UPDATE OF d SKIP LOCKED LIMIT 1) RETURNING *) ' +
-      'SELECT m.*,claim.id AS delivery_id,claim.message_id,claim.attempts,claim.reprocess_id,r.from_at,r.to_at ' +
+      'ORDER BY d.due_at FOR UPDATE OF d SKIP LOCKED LIMIT 1), ' +
+      'claim AS (UPDATE gmail_deliveries d SET attempt_id=$1,attempts=LEAST(d.attempts+1,$2),' +
+      'received_at=NULL,authenticated=NULL,forwarded=NULL,webhook_accepted_at=NULL,retry_requested_at=NULL,' +
+      "due_at=now()+interval '3 minutes' FROM next WHERE d.id=next.id RETURNING d.*," +
+      'next.attempts AS previous_attempts,next.webhook_accepted_at AS previous_webhook_accepted_at,' +
+      'next.retry_requested_at AS previous_retry_requested_at) ' +
+      'SELECT m.*,claim.id AS delivery_id,claim.message_id,claim.attempts,claim.reprocess_id,r.from_at,r.to_at,' +
+      'claim.previous_attempts,claim.previous_webhook_accepted_at,claim.previous_retry_requested_at ' +
       'FROM claim JOIN mailboxes m ON m.id=claim.mailbox_id LEFT JOIN gmail_reprocess_runs r ON r.id=claim.reprocess_id',
-      [attemptId],
+      [attemptId, maxGmailDeliveryAttempts],
     );
     if (!job) return false;
+    const callbackTimedOut = job.previous_retry_requested_at ? null : job.previous_webhook_accepted_at;
+    if (callbackTimedOut) {
+      logGmailDelivery('retry_due', 'callback_timeout', job.previous_attempts, callbackTimedOut);
+    }
     try {
-      if (job.reprocess_id && job.attempts > maxReprocessAttempts) {
+      if (job.previous_attempts >= maxGmailDeliveryAttempts) {
         await this.closeDelivery(job, attemptId, 'error');
+        logGmailDelivery('retry_exhausted', callbackTimedOut ? 'callback_timeout' : 'attempts_exhausted', job.attempts, startedAt);
         return true;
       }
       const access = await this.accessToken(job);
@@ -463,46 +483,44 @@ export class Gmail {
       const from = job.from_at ?? job.linked_at;
       if (!Number.isFinite(+received) || received < from || (job.to_at && received >= job.to_at)) {
         await this.closeDelivery(job, attemptId, 'skipped');
+        logGmailDelivery('skipped', 'received_outside_window', job.attempts, startedAt);
         return true;
       }
       if (message.id !== job.message_id ||
           typeof message.raw !== 'string' || !message.raw.length || message.raw.length > maxRawSize ||
           !/^[A-Za-z0-9_-]+={0,2}$/.test(message.raw)) {
         await this.closeDelivery(job, attemptId, 'error');
+        logGmailDelivery('error', 'invalid_gmail_message', job.attempts, startedAt);
         return true;
       }
-      const mime = await simpleParser(Buffer.from(message.raw, 'base64url'), {
-        skipImageLinks: true, skipTextToHtml: true, skipHtmlToText: true,
-      });
+      const { email, authenticated, alternative } = await readGmailMime(Buffer.from(message.raw, 'base64url'),
+        Array.isArray(message.labelIds) ? message.labelIds : [], typeof message.snippet === 'string' ? message.snippet : '');
+      const forwarded = gmailForwarded(email.subject, email.text) ||
+        (alternative !== undefined && gmailForwarded(email.subject, alternative));
       const bound = await this.db.query<{ openai_enabled: boolean }>(
-        'UPDATE gmail_deliveries d SET received_at=$3 FROM mailboxes m WHERE d.id=$1 AND d.attempt_id=$2 ' +
+        'UPDATE gmail_deliveries d SET received_at=$3,authenticated=$4,forwarded=$5 ' +
+        'FROM mailboxes m WHERE d.id=$1 AND d.attempt_id=$2 ' +
         "AND d.completed_at IS NULL AND m.id=d.mailbox_id AND m.generation=d.generation AND m.state='active' " +
         'RETURNING m.openai_consented_at IS NOT NULL AS openai_enabled',
-        [job.delivery_id, attemptId, received],
+        [job.delivery_id, attemptId, received, authenticated, forwarded],
       );
       if (!bound.rowCount) return true;
       const identity = { deliveryId: job.delivery_id, attemptId, messageId: job.message_id, receivedAt: received.toISOString() };
-      const fromAddress = mime.from?.value.length === 1 ? (mime.from.value[0].address ?? '').slice(0, 320) : '';
-      const email = {
-        labels: Array.isArray(message.labelIds) ? message.labelIds : [],
-        from: fromAddress,
-        subject: (mime.subject ?? '').slice(0, 1000), text: (mime.text ?? '').replace(/\r\n?/g, '\n').slice(0, 30_000),
-      };
       const useOpenAi = bound.rows[0].openai_enabled && Boolean(this.config.OPENAI_API_KEY);
-      const authenticated = gmailAuthenticatedSender(mime.headerLines, fromAddress);
       // Some messages include a plain-text alternative that contains only a notice to view the HTML.
       // Parse both versions independently so dates, amounts and cards are not mixed across versions.
-      const html = mime.html ? convert(mime.html, {
-        wordwrap: false, limits: { maxInputLength: maxRawSize, maxDepth: 100 },
-        selectors: [{ selector: 'img', format: 'skip' }, { selector: 'a', options: { ignoreHref: true } }],
-      }).slice(0, 30_000) : '';
-      const parts = [email.text, html].filter(value => value.trim().length);
-      if (!parts.length && typeof message.snippet === 'string') parts.push(message.snippet.slice(0, 500));
-      let selected = { ...email, text: parts[0] ?? '' };
-      let classification = await this.extraction.classify(selected, false, authenticated);
-      if (parts[1] && parts[1] !== parts[0]) {
-        const alternate = { ...email, text: parts[1] };
-        const alternateResult = await this.extraction.classify(alternate, false, authenticated);
+      let selected = email;
+      let classification = await this.extraction.classify(selected, false, authenticated, identity.receivedAt);
+      if (alternative !== undefined) {
+        const alternate = { ...email, text: alternative };
+        const alternateResult = await this.extraction.classify(alternate, false, authenticated, identity.receivedAt);
+        const readable = classification.status !== 'ignored' ? classification : alternateResult;
+        if (readable.status !== 'ignored' &&
+            (isGmailExplicitNonMovement(email.subject, email.text) || isGmailExplicitNonMovement(alternate.subject, alternate.text))) {
+          await this.results.save({ source: 'oauth', ...identity, provider: readable.provider, forwarded: readable.forwarded,
+            status: 'pending', reason: 'unconfirmed_extraction', confidence: 0 });
+          return true;
+        }
         if ((classification.status === 'ignored' && alternateResult.status !== 'ignored') ||
             (classification.status !== 'registered' && alternateResult.status === 'registered') ||
             (classification.status === 'pending' && alternateResult.status === 'pending' &&
@@ -510,10 +528,12 @@ export class Gmail {
           selected = alternate;
           classification = alternateResult;
         } else if (classification.status === 'registered' && alternateResult.status === 'registered') {
+          const plainReferences = classification.references ?? [];
+          const htmlReferences = alternateResult.references ?? [];
           const plainMovement = classification.movement;
           const htmlMovement = alternateResult.movement;
           if ((['amountMinor', 'currency', 'date', 'direction'] as const).some(key => plainMovement[key] !== htmlMovement[key])) {
-            const { movement: _, ...conflicting } = classification;
+            const { movement: _, references: _references, categoryFromPseConcept: _categoryProof, ...conflicting } = classification;
             await this.results.save({ source: 'oauth', ...identity, ...conflicting,
               status: 'pending', reason: 'unconfirmed_extraction', confidence: 0 });
             return true;
@@ -523,44 +543,67 @@ export class Gmail {
             selected = alternate;
             classification = alternateResult;
           }
+          const references = plainReferences.length && htmlReferences.length
+            ? plainReferences.filter(ref => htmlReferences.includes(ref)) : [...plainReferences, ...htmlReferences];
+          classification = { ...classification, references: references.length ? references : undefined,
+            categoryFromPseConcept: references.some(ref => ref.startsWith('pse:')) ? classification.categoryFromPseConcept : undefined };
         }
       }
-      if (useOpenAi && classification.status === 'pending') classification = await this.extraction.classify(selected, true, authenticated);
+      if (useOpenAi && classification.status === 'pending') {
+        classification = await this.extraction.classify(selected, true, authenticated, identity.receivedAt);
+      }
       if (useOpenAi || !this.config.N8N_GMAIL_WEBHOOK_URL || classification.status === 'registered' ||
           job.reprocess_id || classification.status === 'ignored') {
         await this.results.save({ source: 'oauth', ...identity, ...classification },
-          authenticated && classification.status === 'registered' && !classification.forwarded && classification.provider !== 'other');
+          {
+            verifiedBank: authenticated && classification.status === 'registered' && !classification.forwarded && classification.provider !== 'other',
+            explicitNonMovement: authenticated && classification.status === 'ignored' &&
+              (isGmailExplicitNonMovement(email.subject, email.text) ||
+                alternative !== undefined && isGmailExplicitNonMovement(email.subject, alternative)),
+          });
       } else {
-        await this.deliverToN8n(this.config.N8N_GMAIL_WEBHOOK_URL, { ...identity, ...selected });
+        await this.deliverToN8n(this.config.N8N_GMAIL_WEBHOOK_URL, { ...identity, ...selected, authenticated, forwarded });
+        await this.db.query('UPDATE gmail_deliveries SET webhook_accepted_at=clock_timestamp() ' +
+          'WHERE id=$1 AND attempt_id=$2 AND completed_at IS NULL AND retry_requested_at IS NULL', [job.delivery_id, attemptId]);
+        logGmailDelivery('accepted', undefined, job.attempts, startedAt);
       }
     } catch (error) {
+      const reason = error instanceof GmailWebhookError ? error.reason : 'gmail_processing_failed';
       if (isRevoked(error)) {
         this.accessTokens.delete(job.id);
         await this.db.query("UPDATE mailboxes SET state='reconnect',sync_lease=NULL WHERE id=$1 AND generation=$2 AND state='active'",
           [job.id, job.generation]);
+        logGmailDelivery('reconnect', 'gmail_access_revoked', job.attempts, startedAt);
       } else if (error instanceof GoogleError && error.status === 404) {
         await this.closeDelivery(job, attemptId, 'skipped');
-      } else if (job.reprocess_id && job.attempts >= maxReprocessAttempts) {
+        logGmailDelivery('skipped', 'gmail_message_missing', job.attempts, startedAt);
+      } else if ((error instanceof GmailWebhookError && error.terminal) || job.attempts >= maxGmailDeliveryAttempts) {
         await this.closeDelivery(job, attemptId, 'error');
+        logGmailDelivery(error instanceof GmailWebhookError && error.terminal ? 'error' : 'retry_exhausted',
+          reason, job.attempts, startedAt);
       } else {
-        const delay = job.reprocess_id ? Math.min(120, 20 * 2 ** Math.min(job.attempts - 1, 3)) :
-          Math.min(900, 180 * 2 ** Math.min(job.attempts - 1, 3));
+        const delay = gmailDeliveryRetryDelay(job.attempts, !!job.reprocess_id);
         await this.db.query('UPDATE gmail_deliveries SET due_at=now()+make_interval(secs=>$3::double precision) ' +
-          'WHERE id=$1 AND attempt_id=$2 AND completed_at IS NULL', [job.delivery_id, attemptId, delay]);
-        if (job.attempts === 1 || job.attempts % 10 === 0) console.warn('Gmail delivery will retry');
+          'WHERE id=$1 AND attempt_id=$2 AND completed_at IS NULL AND retry_requested_at IS NULL',
+          [job.delivery_id, attemptId, delay]);
+        logGmailDelivery('retry_scheduled', reason, job.attempts, startedAt);
       }
     }
     return true;
   }
 
   private async deliverToN8n(url: string, body: object) {
+    const signal = AbortSignal.timeout(8000);
     const response = await fetch(url, {
-      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(8000),
+      method: 'POST', redirect: 'error', signal,
       headers: { 'Content-Type': 'application/json', 'X-MailGasto-Agent': this.config.N8N_AGENT_KEY },
       body: JSON.stringify(body),
-    });
-    await response.body?.cancel();
-    if (response.status !== 202) throw new Error('Webhook did not accept delivery');
+    }).catch(() => { throw new GmailWebhookError(signal.aborted ? 'webhook_timeout' : 'webhook_unavailable'); });
+    await response.body?.cancel().catch(() => undefined);
+    if (response.status === 202) return;
+    if ([400, 413, 415, 422].includes(response.status)) throw new GmailWebhookError('contract_rejected', true);
+    if ([401, 403].includes(response.status)) throw new GmailWebhookError('webhook_auth_rejected');
+    throw new GmailWebhookError('webhook_unavailable');
   }
 
   private closeDelivery(job: Job, attemptId: string, outcome: 'error' | 'skipped') {
@@ -613,21 +656,4 @@ export class Gmail {
       throw new ServiceUnavailableException('La conexión OAuth de Gmail aún no está configurada.');
     }
   }
-}
-
-function gmailAuthenticatedSender(headers: readonly { key: string; line: string }[], address: string) {
-  const domain = address.split('@')[1]?.toLowerCase();
-  if (!domain) return false;
-  const gmail = headers.find(({ key, line }) => key === 'authentication-results' &&
-    /^authentication-results:\s*mx\.google\.com\s*;/i.test(line));
-  if (!gmail) return false;
-  const from = /\bdmarc=pass\b[^;]*\bheader\.from=([a-z\d.-]+)/i.exec(gmail.line)?.[1]?.toLowerCase();
-  if (from === domain || (from && from.includes('.') && domain.endsWith('.' + from) &&
-      /(?:^|\.)notificacionesbancolombia\.com$/.test(from))) return true;
-  return gmail.line.split(';').some(part => {
-    if (!/\bdkim=pass\b/i.test(part)) return false;
-    const signer = (/\bheader\.i=(?:[a-z0-9._%+-]+)?@([a-z\d.-]+)/i.exec(part)?.[1] ??
-      /\bheader\.d=([a-z\d.-]+)/i.exec(part)?.[1])?.toLowerCase();
-    return signer === domain || (signer === 'notificacionesbancolombia.com' && domain.endsWith('.' + signer));
-  });
 }

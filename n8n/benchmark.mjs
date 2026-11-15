@@ -1,5 +1,6 @@
 // An unpublished n8n pilot. It never reads Gmail or calls the persistence endpoint.
 import { buildGmailWorkflow, gmailSdk } from './gmail-workflow.mjs';
+import { gmailClassifierCases } from '../test/gmail-classifier-cases.mjs';
 
 const senders = { 'avisos@nequi.example': 'nequi', 'tarjeta@bancolombia.example': 'bancolombia' };
 const formats = [
@@ -20,7 +21,7 @@ const fixtures = formats.flatMap(({ token, ...amount }, group) =>
     return {
       from: income ? 'avisos@nequi.example' : 'tarjeta@bancolombia.example',
       subject: income ? 'Aviso de transferencia' : 'Aviso de compra con tarjeta',
-      text: income ? 'Recibiste ' + token + ' el ' + date + '.' : 'Compraste ' + token + ' en ' + store + ' el ' + date + ' con tarjeta.',
+      text: income ? 'Recibiste ' + token + ' vía Nequi el ' + date + '.' : 'Compraste ' + token + ' en ' + store + ' el ' + date + ' con tarjeta.',
       expected: {
         ...amount, date: '2026-11-10', paymentMethod: income ? 'Nequi' : 'Tarjeta',
         direction: income ? 'income' : 'expense', category: income ? 'ingresos' : category,
@@ -55,7 +56,12 @@ fixtures.push(
     },
   },
 );
-const workflow = buildGmailWorkflow({ senderJson: JSON.stringify(senders) });
+const classifier = process.argv.includes('--chain') ? 'chain' : 'agent';
+const acceptance = process.argv.includes('--acceptance');
+const samples = acceptance ? gmailClassifierCases.map(({ expected: { status, fields }, ...notice }) => ({
+  ...notice, expectedStatus: status, expected: fields ?? {},
+})) : fixtures;
+const workflow = buildGmailWorkflow({ senderJson: JSON.stringify(senders), classifier });
 const label = 'MailGasto IA · Piloto sintético';
 const trigger = {
   type: 'n8n-nodes-base.manualTrigger', typeVersion: 1, name: 'Ejecutar piloto', position: [0, 0], parameters: {},
@@ -64,48 +70,51 @@ const code = (name, position, jsCode) => ({
   type: 'n8n-nodes-base.code', typeVersion: 2, name, position, parameters: { mode: 'runOnceForAllItems', jsCode },
 });
 const cases = code('Construir avisos sintéticos', [240, 0], `
-const fixtures = ${JSON.stringify(fixtures)};
+const fixtures = ${JSON.stringify(samples)};
 const input = $input.first().json;
 const start = Math.min(fixtures.length - 1, Math.max(0, Math.trunc(Number(input.start)) || 0));
 const size = Math.min(3, Math.max(1, Math.trunc(Number(input.size)) || 1));
 const startedAt = new Date().toISOString();
-return fixtures.slice(start, start + size).map(({from,subject,text,expected,expectedStatus,expectedUnconfirmed}, index) => ({
-  json: { identity: {source: 'legacy', messageId: 'synthetic-' + (start + index), receivedAt: startedAt, startedAt},
-    labels: ['INBOX'], from, subject, text, expected, expectedStatus, expectedUnconfirmed }
+return fixtures.slice(start, start + size).map(({id, from, subject, text, expected, expectedStatus, expectedUnconfirmed,
+    receivedAt = startedAt, labels = ['INBOX'], authenticated = true}, index) => ({
+  json: { identity: {source: 'legacy', messageId: id ?? 'synthetic-' + (start + index), receivedAt, startedAt},
+    labels, authenticated, from, subject, text, expected, expectedStatus, expectedUnconfirmed }
 }));
 `);
 const timer = code('Iniciar medición del aviso', [960, 0], `
 return [{ json: { ...$input.first().json, agentStartedAt: Date.now() }, pairedItem: { item: 0 } }];
 `);
 const metrics = code('Medir precisión sintética', [1680, 0], `
-return $input.all().map(({json: {result, agentOutputValid}}, i) => {
+return $input.all().map(({json: {result, agentOutputValid, modelAttempted}}, i) => {
   const { expected, expectedStatus = 'registered', expectedUnconfirmed } = $('Construir avisos sintéticos').itemMatching(i).json;
-  const agent = $('Clasificar aviso con AI Agent').itemMatching(i).json;
+  const agent = modelAttempted && ${classifier === 'agent'} ? $('Clasificar aviso con AI Agent').itemMatching(i).json : null;
   const { agentStartedAt } = $('Iniciar medición del aviso').itemMatching(i).json;
   const mismatches = Object.keys(expected).filter(key => result.movement?.[key] !== expected[key]);
   if (result.status !== expectedStatus) mismatches.push('status');
   if (expectedUnconfirmed && !result.unconfirmedFields?.includes(expectedUnconfirmed)) mismatches.push('unconfirmedFields');
-  const toolCalls = (agent.intermediateSteps ?? []).filter(step => step.action?.tool === 'consultar_reglas_aviso').length;
+  const toolCalls = (agent?.intermediateSteps ?? []).filter(step => step.action?.tool === 'consultar_reglas_aviso').length;
   return { json: { case: result.messageId, status: result.status, mismatches, exact: mismatches.length === 0,
-    agentOutputValid, toolCalls, elapsedMs: Date.now() - agentStartedAt,
+    modelAttempted, agentOutputValid, toolCalls, elapsedMs: Date.now() - agentStartedAt,
     reason: result.reason, unconfirmedFields: result.unconfirmedFields }, pairedItem: { item: i } };
 });
 `);
 const at = (name, position) => ({ ...workflow.nodes.find(node => node.name === name), position });
 const filter = at('Filtrar y proteger aviso', [480, 0]);
 const loop = at('Procesar avisos uno a uno', [720, 0]);
-const agent = at('Clasificar aviso con AI Agent', [1200, 0]);
-agent.parameters = { ...agent.parameters, options: { ...agent.parameters.options, returnIntermediateSteps: true } };
+const isCandidate = at('¿Es aviso de movimiento?', [1120, 0]);
+const ask = at(classifier === 'agent' ? 'Clasificar aviso con AI Agent' : 'Clasificar aviso con Basic LLM Chain', [1280, 0]);
+if (classifier === 'agent') ask.parameters.options = { ...ask.parameters.options, returnIntermediateSteps: true };
 const result = at('Preparar resultado para NestJS', [1440, 0]);
 const model = at('Ollama Chat Model', [1140, 220]);
-const tool = at('consultar_reglas_aviso', [1300, 220]);
-const chain = [trigger, cases, filter, loop, timer, agent, result, metrics];
+const accessory = at(classifier === 'agent' ? 'consultar_reglas_aviso' : 'Analizar salida estructurada', [1300, 220]);
+const chain = [trigger, cases, filter, loop, timer, isCandidate, ask, result, metrics];
 const edge = target => [{ node: target.name, type: 'main', index: 0 }];
 const connections = Object.fromEntries(chain.slice(0, -1).map((node, i) =>
   [node.name, { main: node === loop ? [[], edge(chain[i + 1])] : [edge(chain[i + 1])] }]));
+connections[isCandidate.name].main.push(edge(result));
 connections[metrics.name] = { main: [edge(loop)] };
 connections[model.name] = workflow.connections[model.name];
-connections[tool.name] = workflow.connections[tool.name];
+connections[accessory.name] = workflow.connections[accessory.name];
 
-const pilot = { name: label, nodes: [...chain, model, tool], connections };
+const pilot = { name: label, nodes: [...chain, model, accessory], connections, settings: workflow.settings };
 process.stdout.write(process.argv.includes('--json') ? JSON.stringify(pilot) : gmailSdk(pilot, 'mailgasto-pilot'));

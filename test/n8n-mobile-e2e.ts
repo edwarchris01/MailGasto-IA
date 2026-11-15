@@ -1,12 +1,9 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
 import { DateTime } from 'luxon';
-import { buildGmailWorkflow } from '../n8n/gmail-workflow.mjs';
 import { Agent } from '../src/agent.js';
 import { readConfig } from '../src/config.js';
 import { Database } from '../src/db.js';
@@ -14,90 +11,173 @@ import { Gmail } from '../src/gmail.js';
 import { createApp } from '../src/main.js';
 import { Worker } from '../src/worker.js';
 import { agaval, agavalSubject, bankPurchase, bankPurchaseSubject, shopSender } from './pipeline.fixture.mjs';
+import { installWorkflows, localModel, n8nContainer, n8nWebhook, oauthTestWorkflow, testCredentials,
+  waitFor, waitForProtectedHook } from './n8n-isolated.mjs';
 
 const apiOrigin = 'http://localhost:3116';
-const n8n = 'http://127.0.0.1:5679/webhook';
-const gmailWebhook = n8n + '/mailgasto-private-gmail';
+const webhookPath = 'mailgasto-private-gmail';
+const gmailWebhook = n8nWebhook + '/' + webhookPath;
+const relayPort = 3118;
 const mailpit = 'http://127.0.0.1:8026';
 const gmailScope = 'https://www.googleapis.com/auth/gmail.readonly';
 const sender = 'avisos@banco.example';
 const password = 'synthetic-gmail-e2e-password';
-const agentKey = randomBytes(32).toString('hex');
-const ingestKey = randomBytes(32).toString('hex');
+const credentials = testCredentials('mailgastoe2e');
+const { agentKey, ingestKey } = credentials;
 const run = randomBytes(5).toString('hex');
 const email = `gmail-e2e-${run}@example.test`;
 const today = DateTime.now().setZone('America/Bogota');
 const date = today.toISODate();
-const model = process.env.MAILGASTO_E2E_MODEL ?? 'qwen3.5:4b';
-const credentials = {
-  agent: { id: 'mailgastoe2eagnt', name: 'MailGasto E2E Agent' },
-  ingest: { id: 'mailgastoe2eingst', name: 'MailGasto E2E Ingest' },
-  model: { id: 'mailgastoe2emodel', name: 'MailGasto E2E Ollama' },
-};
+const classifier = process.env.MAILGASTO_E2E_CLASSIFIER;
+const ollamaHost = process.env.MAILGASTO_E2E_OLLAMA_HOST ?? 'ollama';
+assert(/^(?:ollama|ollama-qa-[a-z]+)$/.test(ollamaHost), 'Usa un Ollama local en la red aislada');
+const deterministic = process.env.MAILGASTO_E2E_DETERMINISTIC === '1';
+const invalidModelId = 'invalid-model-' + run;
+const failedCallbackId = 'callback-retry-' + run;
+const secondEqualPaymentId = 'same-amount-' + run;
+const ignoredCallbackId = 'callback-ignored-' + run;
+const modelSubject = 'RECUPERACION QA ' + run;
+const noChargeSubject = 'QA NOTICE WITHOUT CHARGE';
+const restaurant = 'Restaurante Vista';
+const secondRestaurant = 'Restaurante Valle';
+const paid = (name: string) => `Pagaste COP 21.500 en ${name} el ${date}.`;
+const nequiReceipt = `Pagaste COP 25 en Restaurante QA el ${date} con Nequi.`;
+const callback = { faultInjected: false, duplicateObserved: false, ignoredObserved: false,
+  writes: 0, retries: [] as string[], modelRetryScheduled: false };
+let sentInvalidOllamaJson = false;
+let structuredOutput = false;
 
-async function waitFor<T>(name: string, check: () => Promise<T | undefined>, seconds = 30): Promise<T> {
-  const until = Date.now() + seconds * 1000;
-  do {
-    const result = await check();
-    if (result !== undefined) return result;
-    await delay(350);
-  } while (Date.now() < until);
-  throw new Error(`No se pudo comprobar: ${name}`);
+function relayOllama(path: string, method: string, body: Buffer) {
+  const script = `
+    const [host, path, method] = process.argv.slice(1);
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    const response = await fetch('http://' + host + ':11434' + path, {
+      method, ...(method === 'POST' ? {headers:{'Content-Type':'application/json'},body:Buffer.concat(chunks)} : {}),
+      signal:AbortSignal.timeout(145000),
+    });
+    process.stdout.write(JSON.stringify([response.status, response.headers.get('content-type'), await response.text()]));
+  `;
+  return new Promise<[number, string, string]>((resolve, reject) => {
+    const child = spawn('docker', ['exec', '-i', n8nContainer, 'node', '--input-type=module', '-e', script, ollamaHost, path, method],
+      { stdio: ['pipe', 'pipe', 'ignore'] });
+    const chunks: Buffer[] = [];
+    child.stdout.on('data', chunk => chunks.push(chunk));
+    child.on('error', reject);
+    child.stdin.on('error', reject);
+    child.on('close', code => {
+      if (code !== 0) return reject(new Error('Falló Ollama de pruebas'));
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (error) { reject(error); }
+    });
+    child.stdin.end(body);
+  });
 }
 
-function provisionN8n() {
-  const container = 'mailgasto-e2e-n8n';
-  const docker = (...args: string[]) => execFileSync('docker', args, { stdio: ['ignore', 'pipe', 'inherit'] });
-  const temp = mkdtempSync(join(tmpdir(), 'mailgasto-e2e-'));
-  const flow = buildGmailWorkflow({
-    agentCredential: credentials.agent, resultCredential: credentials.ingest, modelCredential: credentials.model,
-    resultUrl: 'http://host.docker.internal:3116/v1/internal/gmail/results',
-    senderJson: JSON.stringify({ [sender]: 'nequi' }), stage: false,
-  });
-  // The isolated instance has no Gmail credential. Keep the production OAuth branch and its AI subnodes.
-  const legacy = new Set(['Gmail Trigger', 'Preparar IDs de Gmail', 'Guardar ID para reintento',
-    'Revisar entregas pendientes', 'Buscar IDs pendientes', 'Reservar reintentos', 'Preparar lectura de Gmail',
-    'Leer cuerpo de Gmail', 'Normalizar Gmail directo', 'Confirmar entrega del Gmail directo', 'Quitar ID resuelto']);
-  flow.nodes = flow.nodes.filter(node => !legacy.has(node.name));
-  flow.nodes.find(node => node.name === 'Ollama Chat Model')!.parameters.model = model;
-  for (const [source, connections] of Object.entries(flow.connections)) {
-    if (legacy.has(source)) delete flow.connections[source];
-    else for (const branches of Object.values(connections)) {
-      for (const branch of branches) {
-        for (let i = branch.length - 1; i >= 0; i--) if (legacy.has(branch[i].node)) branch.splice(i, 1);
+function sampleModel(description?: string) {
+  const nequi = description === 'Restaurante QA';
+  const quote = nequi ? nequiReceipt : description ? paid(description) : null;
+  return {
+    classification: quote ? 'completed' : 'uncertain', amountMinor: nequi ? '2500' : quote ? '2150000' : null,
+    currency: quote ? 'COP' : null, date: quote ? date : null, direction: quote ? 'expense' : null,
+    description: description ?? null, category: quote ? 'alimentacion' : null, paymentMethod: nequi ? 'Nequi' : null,
+    counterpartyRole: quote ? 'merchant' : null, movementKind: quote ? 'payment' : null,
+    evidence: { classification: quote, amountMinor: quote, currency: quote, date: quote, direction: quote,
+      description: description ?? null, category: description ?? null, movementKind: quote },
+  };
+}
+
+const relay = createServer(async (request, response) => {
+  const path = request.url ?? '';
+  const method = request.method ?? '';
+  try {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = Buffer.concat(chunks);
+    if (path === '/result' && method === 'POST' && request.headers['x-mailgasto-ingest'] === ingestKey) {
+      const result = JSON.parse(body.toString('utf8'));
+      const stored = await fetch(apiOrigin + '/v1/internal/gmail/results', {
+        method, headers: { 'Content-Type': 'application/json', 'X-MailGasto-Ingest': ingestKey }, body,
+      });
+      const text = await stored.text();
+      if (stored.ok) {
+        const { outcome } = JSON.parse(text);
+        if (result.messageId === ignoredCallbackId && result.status === 'ignored' && outcome === 'ignored') callback.ignoredObserved = true;
+        if (outcome === 'retry_scheduled') {
+          if (!callback.retries.includes(result.messageId)) callback.retries.push(result.messageId);
+          if (result.messageId === invalidModelId) {
+            assert.equal(result.reason, 'invalid_model_output');
+            callback.modelRetryScheduled = true;
+          }
+        }
+        if (result.messageId === failedCallbackId && result.status === 'registered') {
+          if (outcome === 'stored') callback.writes += 1;
+          if (outcome === 'duplicate') callback.duplicateObserved = true;
+          if (!callback.faultInjected && outcome === 'stored') {
+            // Simulate a response lost after NestJS committed the movement.
+            callback.faultInjected = true;
+            response.writeHead(503, { 'Content-Type': 'application/json' }).end('{"error":"synthetic_callback_failure"}');
+            return;
+          }
+        }
+      }
+      response.writeHead(stored.status, { 'Content-Type': 'application/json' }).end(text);
+      return;
+    }
+    if (method === 'POST' && path === '/api/chat') {
+      const raw = body.toString('utf8');
+      const message = raw.includes('RECUPERACION QA') ? modelSubject :
+        [restaurant, secondRestaurant, 'Restaurante QA'].find(name => raw.includes(name));
+      const reviewFixture = deterministic && (raw.includes('en almacenes Agaval') ||
+        raw.includes('Pagaste COP 13.000 y transferiste COP 14.000'));
+      const ignored = raw.includes(noChargeSubject);
+      if (message || reviewFixture || ignored) {
+        const invalid = message === modelSubject && !callback.modelRetryScheduled;
+        sentInvalidOllamaJson ||= invalid;
+        const sample = sampleModel(message === modelSubject ? undefined : message);
+        if (ignored) {
+          sample.classification = 'not_transaction';
+          sample.evidence.classification = 'Payment requested.';
+        }
+        // The real Structured Output Parser v1.3 asks Ollama for an output wrapper.
+        const reply = invalid ? '{"classification":' : JSON.stringify(structuredOutput ? { output: sample } : sample);
+        response.writeHead(200, { 'Content-Type': 'application/x-ndjson' }).end(JSON.stringify({
+          model: localModel, created_at: new Date().toISOString(), done: true, done_reason: 'stop',
+          message: { role: 'assistant', content: reply },
+        }) + '\n');
+        return;
       }
     }
+    if (path === '/api/tags' && method === 'GET' || path === '/api/chat' && method === 'POST') {
+      const [status, type, text] = await relayOllama(path, method, body);
+      response.writeHead(status, { 'Content-Type': type ?? 'application/json' }).end(text);
+      return;
+    }
+    response.writeHead(404).end();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : 'Falló el relay aislado');
+    response.writeHead(502).end();
   }
+});
+
+function provisionN8n() {
+  const flow = oauthTestWorkflow({
+    credentials, classifier, path: webhookPath, resultUrl: 'http://host.docker.internal:' + relayPort + '/result',
+    senderJson: JSON.stringify({ [sender]: 'nequi' }),
+  });
+  structuredOutput = flow.nodes.some(node => node.type.endsWith('.outputParserStructured'));
   const chat = JSON.parse(execFileSync(process.execPath, ['n8n/workflows.mjs', 'agent'], { encoding: 'utf8' }));
+  chat.settings.executionTimeout = 70;
   for (const node of chat.nodes) {
     if (node.type === 'n8n-nodes-base.webhook') node.credentials.httpHeaderAuth = credentials.agent;
     if (node.type.endsWith('.ollama')) {
       node.credentials.ollamaApi = credentials.model;
-      node.parameters.modelId.value = model;
+      node.parameters.modelId.value = localModel;
     }
   }
   const workflowIds = ['mailgastoe2egmail', 'mailgastoe2echat'];
-  try {
-    writeFileSync(join(temp, 'credentials.json'), JSON.stringify([
-      { ...credentials.agent, type: 'httpHeaderAuth', data: { name: 'X-MailGasto-Agent', value: agentKey } },
-      { ...credentials.ingest, type: 'httpHeaderAuth', data: { name: 'X-MailGasto-Ingest', value: ingestKey } },
-      { ...credentials.model, type: 'ollamaApi', data: { baseUrl: 'http://ollama:11434' } },
-    ]));
-    writeFileSync(join(temp, 'workflows.json'), JSON.stringify([flow, chat].map((workflow, index) => ({
-      ...workflow, id: workflowIds[index], name: `${workflow.name} · E2E local`,
-    }))));
-    for (const kind of ['credentials', 'workflows']) docker('cp', join(temp, `${kind}.json`), `${container}:/tmp/mailgasto-${kind}.json`);
-    try {
-      docker('exec', container, 'n8n', 'import:credentials', '--input=/tmp/mailgasto-credentials.json');
-    } finally {
-      docker('exec', '--user', 'root', container, 'rm', '-f', '/tmp/mailgasto-credentials.json');
-    }
-    docker('exec', container, 'n8n', 'import:workflow', '--input=/tmp/mailgasto-workflows.json');
-    for (const id of workflowIds) docker('exec', container, 'n8n', 'publish:workflow', `--id=${id}`);
-    docker('restart', container);
-  } finally {
-    rmSync(temp, { recursive: true, force: true });
-  }
+  installWorkflows([flow, chat].map((workflow, index) => ({
+    ...workflow, id: workflowIds[index], name: `${workflow.name} · E2E local`,
+  })), credentials, { ollamaUrl: 'http://host.docker.internal:' + relayPort });
 }
 
 async function main() {
@@ -107,18 +187,27 @@ async function main() {
   const config = readConfig({
     PUBLIC_URL: apiOrigin, PORT: '3116', DATABASE_URL: database.href,
     ENCRYPTION_KEY: randomBytes(32).toString('hex'), N8N_INGEST_KEY: ingestKey, N8N_AGENT_KEY: agentKey,
-    N8N_GMAIL_WEBHOOK_URL: gmailWebhook, N8N_AGENT_URL: n8n, N8N_AGENT_TIMEOUT_MS: '30000',
+    N8N_GMAIL_WEBHOOK_URL: gmailWebhook, N8N_AGENT_URL: n8nWebhook, N8N_AGENT_TIMEOUT_MS: '30000',
     GOOGLE_CLIENT_ID: 'synthetic-client', GOOGLE_CLIENT_SECRET: 'synthetic-secret',
+    BANK_SENDERS_JSON: JSON.stringify({ [sender]: 'nequi' }),
     SMTP_URL: 'smtp://127.0.0.1:1026', SMTP_FROM: 'MailGasto QA <mailgasto@example.test>',
   });
   provisionN8n();
   const networkFetch = globalThis.fetch;
   const messages = {
     ['card-' + run]: bankPurchase.replace('10/11/2026', today.toFormat('dd/MM/yyyy')),
-    [`registered-${run}`]: `Pagaste COP 25 en Restaurante QA el ${date} con Nequi. Cuenta 12345678901.`,
+    [`registered-${run}`]: nequiReceipt + ' Cuenta 12345678901.',
     [`other-${run}`]: agaval.replace('10/11/2026', today.toFormat('dd/MM/yyyy')).replace(' a las 12:00pm', ''),
+    [`movistar-${run}`]: `Su pago por $ 60.000 del ${today.toFormat('dd/MM/yyyy')} se aplicó correctamente a la cuenta 1234567891.\nServicio: Internet residencial.`,
+    [`play-${run}`]: 'No pudimos usar la forma de pago Visa-4321.\nSe realizó un cargo en Mastercard-5678.\n' +
+      'Fecha del pedido: ' + today.setLocale('es').toFormat("d LLL yyyy").replace('.', '') + ' 12:26:50 p.m. EDT\n' +
+      'YouTube Premium (YouTube)\t$ 13.300 por mes\nTotal: $ 13.300 por mes\nForma de pago:\nMastercard-5678',
     [`pending-${run}`]: `Pagaste COP 13.000 y transferiste COP 14.000 el ${date}.`,
     [`ignored-${run}`]: 'Hola, mensaje personal de prueba.',
+    [invalidModelId]: `Pagaste COP 13.000 o COP 14.000 el ${date}; la factura actual no distingue el importe cobrado.`,
+    [failedCallbackId]: paid(restaurant),
+    [secondEqualPaymentId]: paid(secondRestaurant),
+    [ignoredCallbackId]: 'Details about the merchant statement. '.repeat(19) + '\nPayment requested. No money has been charged.',
   };
   let oauthChallenge: string | null = null;
   let receivedAt = 0;
@@ -149,9 +238,18 @@ async function main() {
       const isIgnored = id.startsWith('ignored-');
       const isShop = id.startsWith('other-');
       const isCard = id.startsWith('card-');
-      const from = isIgnored || isCard ? 'persona@example.test' : isShop ? shopSender : sender;
+      const isMovistar = id.startsWith('movistar-');
+      const isPlay = id.startsWith('play-');
+      const isControl = [invalidModelId, failedCallbackId, secondEqualPaymentId, ignoredCallbackId].includes(id);
+      const from = isCard ? 'alertasynotificaciones@an.notificacionesbancolombia.com' :
+        isIgnored ? 'persona@example.test' : isShop ? shopSender : isMovistar ? 'movistar@movistar.com.co' :
+          isPlay ? 'googleplay-noreply@google.com' : isControl ? shopSender : sender;
+      const subject = isIgnored ? 'Saludos' : isShop ? agavalSubject : isCard ? bankPurchaseSubject :
+        id === invalidModelId ? modelSubject : id === ignoredCallbackId ? noChargeSubject : isMovistar ? 'Hemos recibido tu pago' :
+          isPlay ? 'Se usó una forma de pago alternativa para YouTube | Tu recibo de pedido de Google Play' : 'Aviso de pago';
       const raw = `From: ${from}\r\nTo: ${email}\r\n` +
-        `Subject: ${isIgnored ? 'Saludos' : isShop ? agavalSubject : isCard ? bankPurchaseSubject : 'Aviso de pago'}\r\nMIME-Version: 1.0\r\n` +
+        'Authentication-Results: mx.google.com; dmarc=pass header.from=' + from.split('@')[1] + '\r\n' +
+        `Subject: ${subject}\r\nMIME-Version: 1.0\r\n` +
         `Content-Type: text/plain; charset=UTF-8\r\n\r\n${messages[id]}`;
       return Response.json({ id, raw: Buffer.from(raw).toString('base64url'), internalDate: String(receivedAt), labelIds: ['INBOX'] });
     }
@@ -162,18 +260,27 @@ async function main() {
   const gmail = app.get(Gmail);
   const worker = new Worker(db, config, gmail, app.get(Agent));
   try {
+    relay.listen(relayPort, '127.0.0.1');
+    await once(relay, 'listening');
     app.enableShutdownHooks();
     await app.listen(config.PORT, '127.0.0.1');
+    // Keep another run's synthetic work from consuming this run's first SMTP, poll or delivery job.
+    await db.query("UPDATE outbox o SET due_at='infinity' FROM accounts a " +
+      "WHERE o.account_id=a.id AND a.email<>$1 AND a.email LIKE 'gmail-e2e-%@example.test' AND o.status='queued'", [email]);
+    await db.query("UPDATE mailboxes SET sync_due_at='infinity' WHERE email<>$1 AND email LIKE 'gmail-e2e-%@example.test'", [email]);
+    await db.query("UPDATE gmail_deliveries d SET due_at='infinity' FROM mailboxes m " +
+      "WHERE d.mailbox_id=m.id AND m.email<>$1 AND m.email LIKE 'gmail-e2e-%@example.test' AND d.completed_at IS NULL", [email]);
     const request = (path: string, data?: object, cookie?: string) => fetch(apiOrigin + '/v1/' + path, {
       method: data === undefined ? 'GET' : 'POST', redirect: 'manual', signal: AbortSignal.timeout(8000),
       headers: { Origin: apiOrigin, 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) },
       ...(data === undefined ? {} : { body: JSON.stringify(data) }),
     });
-    const hook = () => fetch(gmailWebhook, { method: 'POST', signal: AbortSignal.timeout(3500) });
-    await waitFor('webhook de n8n activo y protegido', async () => {
-      const response = await hook().catch(() => undefined);
-      if (response && [401, 403].includes(response.status)) return true;
+    await Promise.all([waitForProtectedHook(webhookPath), waitForProtectedHook('mailgasto-private-intent')]);
+    const malformed = await fetch(gmailWebhook, { method: 'POST',
+      headers: { 'X-MailGasto-Agent': agentKey, 'Content-Type': 'application/json' },
+      body: '{"messageId":"malformed"}', signal: AbortSignal.timeout(8000),
     });
+    assert.equal(malformed.status, 400, 'Una entrega inválida se rechaza antes del 202');
     assert.equal((await request('auth/register', { name: 'Gmail QA', email, password })).status, 202);
     assert.equal(await worker.sendOne(), true);
     const verification = await waitFor('correo de verificación en Mailpit', async () => {
@@ -197,13 +304,25 @@ async function main() {
     // Give each webhook its own time with the local Ollama runner.
     for (let expected = 1; expected <= Object.keys(messages).length; expected++) {
       assert.equal(await gmail.dispatchOne(), true);
-      await waitFor('entrega ' + expected + ' cerrada por el webhook de n8n', async () => {
-        const { rows: [row] } = await db.query<{ count: number }>(
-          'SELECT count(*)::int FROM gmail_deliveries d JOIN mailboxes m ON m.id=d.mailbox_id ' +
-          'WHERE m.email=$1 AND d.completed_at IS NOT NULL', [email],
+      for (;;) {
+        const progress = await waitFor('entrega ' + expected + ' resuelta por n8n o NestJS', async () => {
+          const { rows: [row] } = await db.query<{ count: number }>(
+            'SELECT count(*)::int FROM gmail_deliveries d JOIN mailboxes m ON m.id=d.mailbox_id ' +
+            'WHERE m.email=$1 AND d.completed_at IS NOT NULL', [email],
+          );
+          if (row.count === expected) return { complete: true, retry: null };
+          if (callback.retries.length) return { complete: false, retry: callback.retries.shift()! };
+        }, 160);
+        if (progress.complete) break;
+        // Expedite the existing retry policy only for our synthetic delivery.
+        const expedited = await db.query(
+          "UPDATE gmail_deliveries d SET due_at='epoch' FROM mailboxes m " +
+          'WHERE d.mailbox_id=m.id AND m.email=$1 AND d.message_id=$2 AND d.completed_at IS NULL AND d.due_at>now()',
+          [email, progress.retry],
         );
-        return row.count === expected ? row.count : undefined;
-      }, 160);
+        assert.equal(expedited.rowCount, 1, 'El primer error de Ollama conserva una entrega por reintentar');
+        assert.equal(await gmail.dispatchOne(), true);
+      }
     }
     const { rows: deliveries } = await db.query(
       'SELECT d.message_id,n.status,n.provider,n.reason,t.id,t.amount_minor,t.currency,t.category,' +
@@ -212,11 +331,26 @@ async function main() {
       'JOIN mailboxes m ON m.id=d.mailbox_id LEFT JOIN notices n ON n.mailbox_id=m.id AND n.message_id=d.message_id ' +
       'LEFT JOIN transactions t ON t.notice_id=n.id WHERE m.email=$1 AND d.completed_at IS NOT NULL ORDER BY d.message_id', [email],
     );
-    const [card, ignored, other, ambiguous, registered] = deliveries;
+    const byId = (id: string) => deliveries.find(row => row.message_id === id)!;
+    const [card, ignored, movistar, other, ambiguous, play, registered] =
+      ['card', 'ignored', 'movistar', 'other', 'pending', 'play', 'registered'].map(prefix => byId(prefix + '-' + run));
+    const modelRetry = byId(invalidModelId);
+    const callbackRetry = byId(failedCallbackId);
+    const equalPayment = byId(secondEqualPaymentId);
+    assert(callback.ignoredObserved, 'El descarte OAuth de n8n debe cerrar la entrega mediante callback');
+    assert.equal(byId(ignoredCallbackId).status, null, 'El descarte del webhook no crea un aviso');
+    assert(sentInvalidOllamaJson && callback.modelRetryScheduled, 'La respuesta inválida de Ollama debe programar otro intento');
+    assert.deepEqual([modelRetry.status, modelRetry.amount_minor, modelRetry.attempts], ['pending', null, 2]);
+    assert.deepEqual([callbackRetry.status, equalPayment.status, callbackRetry.amount_minor, equalPayment.amount_minor],
+      ['registered', 'registered', '2150000', '2150000']);
+    assert.notEqual(callbackRetry.id, equalPayment.id, 'Dos pagos del mismo importe deben crear dos movimientos');
+    await waitFor('repetición idempotente del callback', () => Promise.resolve(callback.duplicateObserved || undefined));
+    assert(callback.faultInjected);
+    assert.equal(callback.writes, 1);
     assert.deepEqual(
       [card.status, card.provider, card.amount_minor, card.currency, card.category, card.payment_method, card.description,
         card.transaction_time, card.card_type, card.card_last4, card.reported_institution],
-      ['registered', 'other', '3075000', 'COP', 'otros', 'Tarjeta', 'MERCADO DEL BUENO', '14:42', 'debit', '1234', 'bancolombia'],
+      ['registered', 'bancolombia', '3075000', 'COP', 'otros', 'Tarjeta', 'MERCADO DEL BUENO', '14:42', 'debit', '1234', 'bancolombia'],
     );
     const cardDetail = await (await request('movements/' + card.id, undefined, cookie)).json();
     assert.deepEqual(
@@ -225,38 +359,59 @@ async function main() {
       [date, date, '14:42', 'debit', '1234', 'bancolombia'],
     );
     assert.equal(ignored.status, null);
-    assert.deepEqual([other.status, other.provider, other.amount_minor, other.currency, other.category, other.payment_method, other.direction],
-      ['registered', 'other', '5000000', 'COP', 'compras', null, 'expense']);
-    assert.match(other.description, /agaval/i);
-    assert.equal(other.transaction_time, null);
+    assert.deepEqual(
+      [movistar.status, movistar.provider, movistar.amount_minor, movistar.currency, movistar.category,
+        movistar.payment_method, movistar.description, movistar.direction],
+      ['registered', 'other', '6000000', 'COP', 'vivienda', null, 'Movistar', 'expense'],
+    );
+    assert.deepEqual([play.status, play.amount_minor, play.category, play.payment_method, play.card_last4, play.transaction_time],
+      ['registered', '1330000', 'ocio', 'Tarjeta', '5678', '11:26:50']);
+    // The synthetic Agaval fixture has no configured issuer profile: an unconfirmed model answer
+    // must leave it reviewable. The mobile fixture below uses the confirmed path when available.
+    if (other.status === 'registered') {
+      assert.deepEqual([other.provider, other.amount_minor, other.currency, other.category, other.payment_method, other.direction],
+        ['other', '5000000', 'COP', 'compras', null, 'expense']);
+      assert.match(other.description, /agaval/i);
+      assert.equal(other.transaction_time, null);
+    } else {
+      assert(['pending', 'error'].includes(other.status as string), 'Una respuesta del modelo no corroborada debe ir a revisión');
+      assert.equal(other.amount_minor, null);
+    }
     assert(['pending', 'error'].includes(ambiguous.status), 'Un aviso ambiguo no debe registrarse');
     assert.equal(ambiguous.amount_minor, null);
     assert.deepEqual([registered.status, registered.amount_minor, registered.currency], ['registered', '2500', 'COP']);
-    assert(deliveries.every(row => row.attempts === 1), 'Cada mensaje debe cerrarse en un solo intento');
     while (await worker.sendOne()) {
       // Flush the synthetic outbox before checking the SMTP deliveries.
     }
+    const notified = deliveries.filter(row => row.status === 'registered' ||
+      row.status === 'pending' && row.provider !== 'other' && row.reason !== 'unverified_sender');
     const mailCount = await waitFor('notificaciones SMTP para aviso registrado y pendiente', async () => {
       const { rows } = await db.query("SELECT o.subject FROM outbox o JOIN accounts a ON a.id=o.account_id " +
         "WHERE a.email=$1 AND o.status='sent' ORDER BY o.subject", [email]);
-      if (rows.length === (ambiguous.status === 'pending' ? 5 : 4)) return rows.map(row => row.subject);
+      if (rows.length === 1 + notified.length) {
+        return rows.map(row => row.subject);
+      }
     });
     assert(mailCount.some(subject => subject.includes('Movimiento registrado')));
     if (ambiguous.status === 'pending') assert(mailCount.some(subject => subject.includes('Aviso pendiente')));
-    const response = await fetch(n8n + '/mailgasto-private-intent', {
-      method: 'POST', signal: AbortSignal.timeout(40000),
+    const response = await fetch(n8nWebhook + '/mailgasto-private-intent', {
+      method: 'POST', signal: AbortSignal.timeout(80_000),
       headers: { 'Content-Type': 'application/json', 'X-MailGasto-Agent': agentKey },
       body: JSON.stringify({ text: '¿Cuánto gasté hoy en alimentación?', hasContext: false }),
     });
     assert.equal(response.status, 200);
     const result = await response.json();
     assert.equal(result.result?.action, 'summary', 'Ollama debe responder a través del webhook real de n8n');
-    console.info('PostgreSQL y API: débito •••• 1234 a las 14:42, Agaval sin hora ni medio, y aviso ' + ambiguous.status + '. SMTP y Ollama verificados.');
-    console.info(`API Android: ${apiOrigin} · TEST_GMAIL_E2E_EMAIL=${email}`);
+    console.info('NestJS, n8n, Ollama, PostgreSQL y SMTP verificados. El 400 rechaza el sobre inválido. ' +
+      'Ollama pudo recuperarse de JSON inválido y al repetir el callback no se duplicó el movimiento.');
+    if (process.env.MAILGASTO_E2E_ANDROID === '1' && other.status === 'registered') {
+      console.info(`API Android: ${apiOrigin} · TEST_GMAIL_E2E_EMAIL=${email}`);
+    } else await app.close();
   } catch (error) {
     await app.close();
     throw error;
   } finally {
+    relay.close();
     await worker.onApplicationShutdown();
   }
 }

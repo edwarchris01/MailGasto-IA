@@ -4,22 +4,36 @@ export const bank = 'Pagaste COP 25.000 en Restaurante Demo el 10/11/2026. Cuent
 export const bankSender = 'alertas@nequi.example';
 export const shopSender = 'avisos@comercio.example';
 export const agavalSubject = 'Pago de ropa';
-export const agaval = 'Tu pago fue procesado, pagaste 50.000 en almacenes Agaval, el 10/11/2026 a las 12:00pm, gracias por tu compra.';
+export const agaval = 'Tu pago fue procesado, pagaste COP 50.000 en almacenes Agaval, el 10/11/2026 a las 12:00pm, gracias por tu compra.';
 export const bankPurchaseSubject = 'Alertas y Notificaciones – Compra';
 export const bankPurchase = 'Bancolombia: Compraste $30.750,00 en MERCADO DEL BUENO con tu T.Deb *1234, el 10/11/2026 a las 14:42.';
-export const flow = buildGmailWorkflow({ senderJson: JSON.stringify({ [bankSender]: 'nequi', 'tarjeta@bancolombia.example': 'bancolombia' }) });
+export const flow = buildGmailWorkflow({ classifier: 'agent',
+  senderJson: JSON.stringify({ [bankSender]: 'nequi', 'tarjeta@bancolombia.example': 'bancolombia' }) });
+export const blankEvidence = {
+  classification: null, amountMinor: null, currency: null, date: null, direction: null,
+  description: null, category: null, movementKind: null,
+};
+export const uncertainModel = {
+  classification: 'uncertain', amountMinor: null, currency: null, date: null, direction: null,
+  description: null, category: null, paymentMethod: null, movementKind: null, counterpartyRole: null, evidence: blankEvidence,
+};
 export const goodModel = {
-  amountMinor: '2500000', currency: 'COP', date: '2026-11-10', paymentMethod: 'Nequi', description: 'Restaurante Demo',
-  category: 'alimentacion', direction: 'expense', confidence: 0.95, classification: 'completed',
-  categoryEvidence: 'Restaurante Demo',
+  ...uncertainModel, amountMinor: '2500000', currency: 'COP', date: '2026-11-10', paymentMethod: 'Nequi',
+  description: 'Restaurante Demo', category: 'alimentacion', direction: 'expense', classification: 'completed',
+  movementKind: 'payment', counterpartyRole: 'merchant', evidence: {
+    classification: 'Pagaste', amountMinor: 'COP 25.000', currency: 'COP', date: 'el 10/11/2026',
+    direction: 'Pagaste', description: 'Restaurante Demo', category: 'Restaurante Demo', movementKind: 'Pagaste',
+  },
 };
 export const agavalMovement = {
   amountMinor: '5000000', currency: 'COP', date: '2026-11-10', paymentMethod: null,
-  description: 'Almacenes Agaval', category: 'compras', direction: 'expense',
+  description: 'almacenes Agaval', category: 'compras', direction: 'expense',
   transactionTime: '12:00', cardType: null, cardLast4: null, reportedInstitution: null,
 };
 export const agavalModel = {
-  ...agavalMovement, classification: 'completed', categoryEvidence: agavalSubject, confidence: 0.95,
+  ...goodModel, amountMinor: agavalMovement.amountMinor, paymentMethod: null, description: 'almacenes Agaval', category: 'compras',
+  evidence: { ...goodModel.evidence, classification: 'Tu pago fue procesado', amountMinor: 'COP 50.000',
+    direction: 'pagaste', description: 'almacenes Agaval', category: agavalSubject, movementKind: 'pagaste' },
 };
 export const wrap = json => ({ json });
 
@@ -29,11 +43,17 @@ export function runCode(name, items, references = {}) {
   return code({ all: () => items }, key => ({ itemMatching: index => references[key][index] }));
 }
 
-export function legacyInput(messageId, receivedAt, text = bank, from = bankSender, subject = 'Aviso de pago', labels = ['INBOX']) {
+export function legacyInput(messageId, receivedAt, text = bank, from = bankSender, subject = 'Aviso de pago', labels = ['INBOX'], authenticated = true, attempts = 1) {
   const staging = runCode('Preparar IDs de Gmail', [wrap({ id: messageId, internalDate: String(Date.parse(receivedAt)) })]);
-  const read = runCode('Preparar lectura de Gmail', [wrap({ ...staging[0].json, id: 1 })]);
-  return runCode('Normalizar Gmail directo', [wrap({ id: messageId, from: { value: [{ address: from }] }, subject, text, labelIds: labels })],
-    { 'Preparar lectura de Gmail': read });
+  const read = runCode('Preparar lectura de Gmail', [wrap({ ...staging[0].json, id: 1, attempts })]);
+  const domain = from.split('@')[1];
+  const headers = typeof authenticated === 'string' ? [
+    { name: 'Authentication-Results', value: 'mx.google.com; dmarc=fail header.from=' + domain },
+    { name: 'Authentication-Results', value: 'mx.google.com; dmarc=pass header.from=' + domain },
+  ] : authenticated ? [{ name: 'Authentication-Results', value: 'mx.google.com; dmarc=pass header.from=' + domain }] : [];
+  const mail = wrap({ id: messageId, from: { value: [{ address: from }] }, subject, text, labelIds: labels });
+  return runCode('Normalizar Gmail directo', [wrap({ id: messageId, payload: { headers } })],
+    { 'Preparar lectura de Gmail': read, 'Leer cuerpo de Gmail': [mail] });
 }
 
 export function filterAndResolve(input, model = goodModel) {
@@ -45,5 +65,5 @@ export function filterAndResolve(input, model = goodModel) {
 }
 
 export function oauthInput(body) {
-  return runCode('Normalizar Gmail OAuth', [wrap({ body })]);
+  return runCode('Normalizar Gmail OAuth', [wrap({ body: { authenticated: true, ...body } })]);
 }

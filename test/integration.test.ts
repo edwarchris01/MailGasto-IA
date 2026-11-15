@@ -13,16 +13,16 @@ import { Gmail } from '../src/gmail.js';
 import { createApp } from '../src/main.js';
 import { Worker } from '../src/worker.js';
 import { agaval, agavalModel, agavalSubject, bank, bankPurchase, bankPurchaseSubject, bankSender, filterAndResolve, goodModel, legacyInput,
-  oauthInput, shopSender } from './pipeline.fixture.mjs';
+  oauthInput, runCode, shopSender, uncertainModel } from './pipeline.fixture.mjs';
 
 const connection = process.env.MAILGASTO_TEST_DATABASE_URL;
 const origin = 'http://localhost:3105';
 const ingestKey = 'test-ingest-key-for-local-integration-only';
 const password = 'synthetic-test-password';
-const rawMessage = (subject: string, body: string, sender = 'alertas@nequi.example', authenticated = false) => Buffer.from(
+const rawMessage = (subject: string, body: string, sender = 'alertas@nequi.example', authenticated: boolean | string = false) => Buffer.from(
   'From: <' + sender + '>\r\nTo: owner@example.test\r\nSubject: ' + subject +
-  (authenticated ? '\r\nAuthentication-Results: mx.google.com;\r\n  dkim=pass header.i=@notificacionesbancolombia.com;\r\n  ' +
-    'dmarc=pass header.from=notificacionesbancolombia.com' : '') +
+  (authenticated ? '\r\nAuthentication-Results: mx.google.com;\r\n  dmarc=pass header.from=' +
+    (typeof authenticated === 'string' ? authenticated : 'notificacionesbancolombia.com') : '') +
   '\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n' + body,
 ).toString('base64url');
 
@@ -30,7 +30,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
   assert.match(new URL(connection!).pathname, /^\/mailgasto(?:_test)?$/);
   const agentKey = 'test-agent-key-for-local-integration-only';
   const deliveries: Array<{ messageId: string; deliveryId: string; attemptId: string; receivedAt: string; text: string }> = [];
-  let webhookOffline = false;
+  let webhookStatus = 202;
   const model = createServer(async (req, res) => {
     const chunks: Uint8Array[] = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -39,7 +39,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
     if (req.url === '/webhook/mailgasto-private-gmail') {
       if (req.headers['x-mailgasto-agent'] !== agentKey) { res.writeHead(401).end('{}'); return; }
       deliveries.push(data);
-      res.writeHead(webhookOffline ? 503 : 202).end('{}');
+      res.writeHead(webhookStatus).end('{}');
       return;
     }
     if (req.url?.includes('intent')) {
@@ -131,24 +131,27 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
   assert.equal(attempts.filter(([code, body]) => code === 200 && body.outcome === 'duplicate').length, 7);
   const durations = [performance.now() - started];
 
-  const forwarded = filterAndResolve(legacyInput('forwarded', simulatedArrival,
-    '---------- Mensaje reenviado ---------\r\nDe: alertas@nequi.example\r\n\r\nPagaste USD 12.50 en Restaurante Demo el 10/11/2026.',
-    ownerEmail), { ...goodModel, amountMinor: '1250', currency: 'USD' });
-  assert.equal(forwarded.forwarded, true);
-  assert.equal((await (await post(forwarded)).json()).outcome, 'stored');
+  const usd = filterAndResolve(legacyInput('usd', simulatedArrival,
+    'Pagaste USD 12.50 en Restaurante Demo el 10/11/2026.'),
+  { ...goodModel, amountMinor: '1250', currency: 'USD', evidence: { ...goodModel.evidence, amountMinor: 'USD 12.50', currency: 'USD' } });
+  assert.equal(usd.status, 'registered');
+  assert.equal((await (await post(usd)).json()).outcome, 'stored');
   assert.equal(filterAndResolve(legacyInput('ignored', simulatedArrival, 'Hola', otherEmail, 'Feliz cumpleaños')), undefined);
   const pending = filterAndResolve(legacyInput('pending', simulatedArrival, bankPurchase + ' Monto COP 50.000.',
-    bankSender, bankPurchaseSubject));
+    bankSender, bankPurchaseSubject), { ...goodModel, amountMinor: '3075000', evidence: {
+    ...goodModel.evidence, amountMinor: '$30.750,00', currency: '$', classification: 'Compraste', direction: 'Compraste',
+  } });
   assert.equal(pending.status, 'pending');
   assert.equal((await (await post(pending)).json()).outcome, 'stored');
-  const unavailable = filterAndResolve(legacyInput('technical', simulatedArrival, 'Pagaste en Restaurante Demo.'), null);
+  const unavailable = filterAndResolve(legacyInput('technical', simulatedArrival, 'Pagaste en Restaurante Demo.',
+    bankSender, 'Aviso de pago', ['INBOX'], true, 5), null);
   assert.equal(unavailable.status, 'error');
   assert.equal((await (await post(unavailable)).json()).outcome, 'stored');
   const technical = await (await request('notices?status=error', 'GET', undefined, owner)).json();
   assert.equal(technical.items[0].reason, 'extractor_unavailable');
   for (let i = 0; i < 12; i++) {
     const start = performance.now();
-    const backup = filterAndResolve(legacyInput('fixture-' + i, simulatedArrival), null);
+    const backup = filterAndResolve(legacyInput('fixture-' + i, simulatedArrival));
     assert.equal((await (await post(backup)).json()).outcome, 'stored');
     durations.push(performance.now() - start);
   }
@@ -181,6 +184,16 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
   );
   const purchaseReport = await (await request('summary?category=compras', 'GET', undefined, owner)).json();
   assert.deepEqual(purchaseReport.totals, [{ currency: 'COP', category: null, amount_minor: '5000000', count: 1 }]);
+  const bre = filterAndResolve(legacyInput('bre-b', simulatedArrival,
+    'Enviaste de manera exitosa 41.500 a la llave 1000000000 de PERSONA DEMO el 11 de noviembre de 2026 a las 4:13 a.m.',
+    'notificaciones@nequi.com.co', '¡Enviaste plata por Bre-B!'), uncertainModel);
+  assert.equal(bre.status, 'pending');
+  assert.equal((await (await post(bre)).json()).outcome, 'stored');
+  const { rows: [breSaved] } = await db.query(
+    'SELECT n.id,t.id AS movement,n.reported_payment_method FROM notices n LEFT JOIN transactions t ON t.notice_id=n.id ' +
+    'WHERE n.message_id=$1', ['bre-b']);
+  assert.equal(breSaved.movement, null);
+  assert.equal(breSaved.reported_payment_method, 'Bre-B');
 
   const session = (await (await request('chat/sessions', 'POST', undefined, owner)).json()).id;
   const chatPath = 'chat/sessions/' + session + '/messages';
@@ -195,7 +208,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
   assert.match((await (await request(chatPath, 'POST', { message: 'Registra un gasto de 5.000' }, owner)).json()).answer, /Reenvía/);
   assert.equal((await (await request(chatPath, 'GET', undefined, owner)).json()).length, 5);
   const queued = await db.query("SELECT dedupe_key FROM outbox o JOIN accounts a ON a.id=o.account_id WHERE a.email=$1 AND o.status='queued'", [ownerEmail]);
-  assert.equal(queued.rows.length, 16);
+  assert.equal(queued.rows.length, 17);
 
   // Fail PostgreSQL during the movement insert and verify the notice and outbox roll back together.
   const failed = direct('pg-failure');
@@ -222,6 +235,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
   const review = { amountMinor: '4200000', currency: 'COP', date: '2020-01-02', direction: 'income' };
   const confirm = (path: string, data = review, cookie = owner) => request(path + '/confirm', 'POST', data, cookie);
   const discard = (path: string, cookie = owner) => request(path, 'DELETE', undefined, cookie);
+  assert.equal((await discard('notices/' + breSaved.id)).status, 204);
   assert.equal((await confirm(pendingPath, review, other)).status, 404);
   assert.equal((await discard(pendingPath, other)).status, 404);
   assert.equal((await confirm(pendingPath, { ...review, amountMinor: '0' })).status, 400);
@@ -294,9 +308,18 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       '--alternative--', '',
     ].join('\r\n')).toString('base64url'),
     'past-copy': rawMessage('Alertas y Notificaciones', deposits, bankAddress, true),
-    'past-personal': rawMessage('Feliz cumpleaños', 'Hola', shopSender),
+    'past-personal': rawMessage('Faltan fondos para pagar en Google', 'Faltan fondos para pagar $19.900 en Google.', 'nu@nu.com.co', 'nu.com.co'),
+    'past-not-authenticated': rawMessage('Faltan fondos para pagar en Google', 'Faltan fondos para pagar $9.900 en Google.', 'nu@nu.com.co'),
     'past-uncertain': rawMessage('Pago recibido', 'Recibimos tu pago de $37.200 el ' + operationDay + '.', shopSender),
     'outside-month': rawMessage('Alertas y Notificaciones', deposits, bankAddress, true),
+    'contradictory-mime': Buffer.from([
+      'From: <' + bankAddress + '>', 'Subject: Alertas y Notificaciones',
+      'Authentication-Results: mx.google.com; dkim=pass header.d=notificacionesbancolombia.com', 'MIME-Version: 1.0',
+      'Content-Type: multipart/alternative; boundary=testboundary', '',
+      '--testboundary', 'Content-Type: text/plain; charset=UTF-8', '', deposits,
+      '--testboundary', 'Content-Type: text/html; charset=UTF-8', '', '<p>Transacción rechazada. Faltan fondos para pagar.</p>',
+      '--testboundary--', '',
+    ].join('\r\n')).toString('base64url'),
   };
   const scanPages: (string | null)[] = [];
   globalThis.fetch = (async (input, init) => {
@@ -316,13 +339,15 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       const page = params.get('pageToken');
       scanPages.push(page);
       assert.match(params.get('q') ?? '', new RegExp('^after:' + (Math.floor(month.toSeconds()) - 1) + ' before:\\d+ -in:sent -in:drafts$'));
-      return Response.json(page ? { messages: ['past-copy', 'past-personal', 'past-uncertain', 'outside-month'].map(id => ({ id })) } :
+      return Response.json(page ? { messages: ['past-copy', 'past-personal', 'past-not-authenticated', 'past-uncertain', 'outside-month'].map(id => ({ id })) } :
         { messages: ['direct', 'past-qr', 'past-payroll'].map(id => ({ id })), nextPageToken: 'second' });
     }
     if (url.includes('gmail.googleapis.com') && url.includes('/messages/')) {
       const id = new URL(url).pathname.split('/').at(-1)!;
-      const raw = historical[id] ?? (id === 'personal' ? rawMessage('Feliz cumpleaños', 'Hola', otherEmail) : rawMessage('Aviso de pago', bank, bankSender));
-      const internalDate = id === 'outside-month' ? month.toMillis() - 1000 : historical[id] ? earlier.toMillis() : Date.now() + 50;
+      const raw = historical[id] ?? (id === 'personal' ? rawMessage('Feliz cumpleaños', 'Hola', otherEmail) :
+        rawMessage('Aviso de pago', bank, bankSender, 'nequi.example'));
+      const internalDate = id === 'outside-month' ? month.toMillis() - 1000 :
+        historical[id] && id !== 'contradictory-mime' ? earlier.toMillis() : Date.now() + 50;
       return Response.json({ id, raw, internalDate: String(internalDate), labelIds: ['INBOX'] });
     }
     return fetchReal(input, init);
@@ -343,10 +368,10 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       await db.query('UPDATE mailboxes SET sync_due_at=now() WHERE id=$1', [linked]);
       await gmail.pollOne();
     };
-    webhookOffline = true;
+    webhookStatus = 503;
     assert.equal(await gmail.dispatchOne(), true);
     assert.equal(await gmail.dispatchOne(), false);
-    webhookOffline = false;
+    webhookStatus = 202;
     await reschedule();
     await gmail.dispatchOne();
     const first = deliveries.at(-1)!;
@@ -379,6 +404,11 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
         "INSERT INTO notices (mailbox_id,message_id,received_at,provider,forwarded,status,reason) " +
         "VALUES ($1,'past-qr',$2,'bancolombia',false,'error','extractor_unavailable') RETURNING id", [linked, earlier.toJSDate()],
       );
+      const outdated = await db.query(
+        "INSERT INTO notices (mailbox_id,message_id,received_at,provider,forwarded,status,reason,reported_amount_minor) " +
+        "VALUES ($1,'past-personal',$2,'other',false,'pending','unconfirmed_extraction',1990000)," +
+        "($1,'past-not-authenticated',$2,'other',false,'pending','unconfirmed_extraction',990000) RETURNING id,message_id", [linked, earlier.toJSDate()],
+      );
       const messagesBefore = (await db.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count;
       const launch = await request(path, 'POST', undefined, other);
       assert.equal(launch.status, 202);
@@ -392,7 +422,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       assert.equal(await gmail.dispatchOne(), true);
       assert.equal(await gmail.scanReprocessPage(), true);
       const webhooksBefore = deliveries.length;
-      for (let index = 0; index < 4; index++) assert.equal(await gmail.dispatchOne(), true);
+      for (let index = 0; index < 5; index++) assert.equal(await gmail.dispatchOne(), true);
       assert.equal(await gmail.dispatchOne(), false);
       assert.equal(deliveries.length, webhooksBefore);
       assert.equal(await gmail.scanReprocessPage(), false);
@@ -400,23 +430,29 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       const { reprocess } = (await (await request('mailboxes', 'GET', undefined, other)).json())[0];
       assert.ok(reprocess.finishedAt);
       assert.equal(reprocess.failure, null);
-      assert.deepEqual(reprocess.summary, { registered: 2, pending: 2, ignored: 1, skipped: 2 });
+      assert.deepEqual(reprocess.summary, { registered: 2, pending: 3, ignored: 1, skipped: 2 });
       const notices = await db.query('SELECT n.id,message_id,status,reason,amount_minor,payment_method,transaction_time,direction ' +
         'FROM notices n LEFT JOIN transactions t ON t.notice_id=n.id WHERE n.mailbox_id=$1 ORDER BY message_id', [linked]);
       assert.deepEqual(notices.rows.map(row => [row.message_id, row.status, row.amount_minor, row.payment_method, row.direction]), [
         ['direct', 'registered', '2500000', null, 'expense'],
         ['past-copy', 'pending', null, null, null],
+        ['past-not-authenticated', 'pending', null, null, null],
         ['past-payroll', 'registered', '112345001', null, 'income'],
+        ['past-personal', 'discarded', null, null, null],
         ['past-qr', 'registered', '3510000', 'QR', 'expense'],
         ['past-uncertain', 'pending', null, null, null],
       ]);
       assert.equal(notices.rows[0].id, list.items[0].id);
       assert.equal(notices.rows[1].reason, 'possible_duplicate');
-      assert.equal(notices.rows[2].transaction_time, '10:08');
-      assert.equal(notices.rows[3].id, existing.rows[0].id);
+      assert.equal(notices.rows[3].transaction_time, '10:08');
+      assert.equal(notices.rows[4].reason, 'not_transaction');
+      const dismissedId = outdated.rows.find(row => row.message_id === 'past-personal')!.id;
+      assert.equal((await request('notices/' + dismissedId, 'GET', undefined, other)).status, 404);
+      assert.equal((await db.query('SELECT reported_amount_minor FROM notices WHERE id=$1', [dismissedId])).rows[0].reported_amount_minor, null);
+      assert.equal(notices.rows[5].id, existing.rows[0].id);
       assert.equal((await db.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, messagesBefore);
       // A movement saved by the older workflow can be missing the time and method.
-      const confirmedId = notices.rows[3].id;
+      const confirmedId = notices.rows[5].id;
       const original = await db.query('UPDATE transactions SET payment_method=NULL WHERE notice_id=$1 RETURNING id', [confirmedId]);
       await db.query('UPDATE notices SET transaction_time=NULL,reported_payment_method=NULL WHERE id=$1', [confirmedId]);
       const second = await request(path, 'POST', undefined, other);
@@ -436,6 +472,13 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
     });
     const tokenRow = await db.query('SELECT secret FROM mailboxes WHERE id=$1', [linked]);
     assert.notEqual(tokenRow.rows[0].secret, 'refresh');
+    await poll('contradictory-mime');
+    assert.equal(await gmail.dispatchOne(), true);
+    const contradictory = await db.query(
+      'SELECT n.status,n.reason,t.id AS transaction_id FROM notices n LEFT JOIN transactions t ON t.notice_id=n.id ' +
+      "WHERE n.mailbox_id=$1 AND n.message_id='contradictory-mime'", [linked],
+    );
+    assert.deepEqual(contradictory.rows, [{ status: 'pending', reason: 'unconfirmed_extraction', transaction_id: null }]);
     await poll('in-flight');
     await gmail.dispatchOne();
     const late = filterAndResolve(oauthInput(deliveries.at(-1)!));
@@ -461,7 +504,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       { state: 'disconnected', providerRevoked: true });
     assert.equal((await (await post(renewed)).json()).outcome, 'discarded');
     assert.equal((await db.query('SELECT 1 FROM gmail_deliveries WHERE mailbox_id=$1 AND completed_at IS NULL', [linked])).rowCount, 0);
-    assert.equal((await (await request('notices', 'GET', undefined, other)).json()).items.length, 5);
+    assert.equal((await (await request('notices', 'GET', undefined, other)).json()).items.length, 7);
 
     const mobileOrigin = 'https://mailgasto.example.test';
     const fingerprint = Array(32).fill('AA').join(':');
@@ -520,7 +563,179 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
     } finally {
       await mobileApp.close();
     }
+    await t.test('closes a rejected webhook payload without repeating the POST', async () => {
+      webhookStatus = 400;
+      const before = deliveries.length;
+      try {
+        await poll('invalid-contract');
+        assert.equal(await gmail.dispatchOne(), true);
+        assert.equal(await gmail.dispatchOne(), false);
+        assert.equal(deliveries.length, before + 1);
+        const { rows: [rejected] } = await db.query(
+          "SELECT completed_at IS NOT NULL AS complete,attempts FROM gmail_deliveries WHERE message_id='invalid-contract' AND mailbox_id=$1",
+          [linked],
+        );
+        assert.deepEqual(rejected, { complete: true, attempts: 1 });
+      } finally {
+        webhookStatus = 202;
+      }
+    });
   } finally {
     globalThis.fetch = fetchReal;
   }
+
+  await t.test('conciliates authenticated receipt copies before saving either one as a second movement', async () => {
+    const aval = 'info@pasarelapagosaval.com';
+    const avalpay = 'no-responder@avalpaycenter.com.co';
+    const confirmedBody = (reference: string, amount = '$690,512.00') => 'Tu transacción ha sido aprobada\n' +
+      `Empresa\tComercio de prueba\nValor de transacción\t${amount}\nMedio de pago\tBre-B\n` +
+      `ID Transacción\t${reference}\nFecha y hora\t${operationDay} 09:52:24 AM`;
+    const partialBody = (reference: string) => `La transacción con ID número ${reference}, por valor de $690.512, realizada en el sitio https://example.test.\nSe encuentra en estado`;
+    const result = (id: string, body: string, from: string, title: string) => {
+      const input = legacyInput(id, simulatedArrival, body, from, title);
+      const [filtered] = runCode('Filtrar y proteger aviso', input);
+      assert.doesNotMatch(JSON.stringify(filtered.json.modelInput), /202601010000000TEST\d+|1432568724/i);
+      return filterAndResolve(input, uncertainModel);
+    };
+    const confirmed = (name: string, ref: string, amount?: string) =>
+      result(name, confirmedBody(ref, amount), aval, 'Pasarela de Pagos - APROBADA');
+    const partial = (name: string, ref: string) =>
+      result(name, partialBody(ref), avalpay, 'AvalPay Center: Comprobante de pago transacción Bre-B');
+    const first = '202601010000000TEST000000000000001';
+    const second = '202601010000000TEST000000000000002';
+    const copy = partial('references-before-partial', first);
+    assert.equal(copy.status, 'pending');
+    assert.equal(copy.avalCopy, true);
+    assert.equal((await (await post(copy)).json()).outcome, 'stored');
+    assert.equal((await (await post(confirmed('references-before-paid', first))).json()).outcome, 'stored');
+    assert.equal((await (await post(confirmed('references-after-paid', second))).json()).outcome, 'stored');
+    assert.equal((await (await post(partial('references-after-partial', second))).json()).outcome, 'duplicate');
+    const copyWithAnotherValue = confirmed('references-conflict', second, '$680,512.00');
+    assert.equal((await (await post(copyWithAnotherValue)).json()).outcome, 'stored');
+    const ach = 'serviciopse@achcolombia.com.co';
+    const cus = '1432568724';
+    const pay = result('references-pse', `Valor: COP $8.450\nEmpresa: Farmacia Demo\nDescripción: Toallas higiénicas\nFecha de la transacción: ${operationDay}\nCUS: ${cus}`,
+      ach, 'PSE - Transacción Aprobada');
+    const payCopy = result('references-nequi', `Hiciste un pago en Farmacia Demo por $8.450\nFecha: ${operationDay}\nCUS: ${cus}`,
+      'somos@nequi.com.co', '¡Pago exitoso!');
+    const concurrent = await Promise.all([post(pay), post(payCopy)]);
+    const saved = await Promise.all(concurrent.map(response => response.json()));
+    assert.deepEqual(saved.map(body => body.outcome).sort(), ['duplicate', 'stored']);
+
+    const database = await db.query("SELECT n.message_id,n.status,n.reason,t.amount_minor::text,t.category,s.fingerprint FROM notices n " +
+      'LEFT JOIN transactions t ON t.notice_id=n.id LEFT JOIN gmail_operation_references s ON s.notice_id=n.id ' +
+      "WHERE n.message_id LIKE 'references-%' ORDER BY n.message_id");
+    assert.deepEqual(database.rows.filter(row => !['references-nequi', 'references-pse'].includes(row.message_id))
+      .map(row => [row.message_id, row.status, row.reason, row.amount_minor]), [
+      ['references-after-paid', 'registered', null, '69051200'],
+      ['references-before-paid', 'registered', null, '69051200'],
+      ['references-before-partial', 'discarded', 'verified_duplicate', null],
+      ['references-conflict', 'pending', 'possible_duplicate', null],
+    ]);
+    assert.equal(database.rows.filter(row => ['references-nequi', 'references-pse'].includes(row.message_id)).length, 1);
+    assert.equal(database.rows.find(row => ['references-nequi', 'references-pse'].includes(row.message_id))?.category, 'compras');
+    assert(database.rows.every(row => /^[0-9a-f]{64}$/.test(row.fingerprint)));
+    const [{ id: otherAccount }] = (await db.query('SELECT id FROM accounts WHERE email=$1', [otherEmail])).rows;
+    const [{ id: otherMailbox, generation }] = (await db.query("SELECT id,generation FROM mailboxes WHERE account_id=$1 AND source='oauth'", [otherAccount])).rows;
+    const attemptId = randomUUID();
+    const messageId = 'references-other-owner';
+    const [{ id: deliveryId }] = (await db.query(
+      'INSERT INTO gmail_deliveries (mailbox_id,generation,message_id,attempt_id,received_at,authenticated,forwarded) ' +
+      'VALUES ($1,$2,$3,$4,$5,true,false) RETURNING id',
+      [otherMailbox, generation, messageId, attemptId, new Date()],
+    )).rows;
+    const [{ received_at: otherReceived }] = (await db.query('SELECT received_at FROM gmail_deliveries WHERE id=$1', [deliveryId])).rows;
+    const duplicateAtOtherOwner = filterAndResolve(oauthInput({ deliveryId, attemptId, messageId, receivedAt: otherReceived.toISOString(),
+      labels: ['INBOX'], from: ach, subject: 'PSE - Transacción Aprobada',
+      text: `Valor: COP $8.450\nEmpresa: Farmacia Demo\nFecha de la transacción: ${operationDay}\nCUS: ${cus}`,
+    }), uncertainModel);
+    assert.equal((await (await post(duplicateAtOtherOwner)).json()).outcome, 'stored');
+    const [{ fingerprint: otherFingerprint }] = (await db.query('SELECT s.fingerprint FROM gmail_operation_references s ' +
+      'JOIN notices n ON n.id=s.notice_id WHERE n.mailbox_id=$1 AND n.message_id=$2', [otherMailbox, messageId])).rows;
+    assert.notEqual(otherFingerprint, database.rows.find(row => ['references-nequi', 'references-pse'].includes(row.message_id))?.fingerprint);
+    const visible = (await (await request('notices?unregistered=true', 'GET', undefined, owner)).json()).items;
+    assert(visible.some((row: { reason: string }) => row.reason === 'possible_duplicate'));
+    assert(!visible.some((row: { reason: string }) => row.reason === 'verified_duplicate'));
+  });
+
+});
+
+test('Gmail callback enforces authenticity and idempotent bounded retries', { skip: !connection }, async t => {
+  assert.match(new URL(connection!).pathname, /^\/mailgasto(?:_test)?$/);
+  const config = readConfig({
+    PUBLIC_URL: origin, DATABASE_URL: connection, ENCRYPTION_KEY: 'ab'.repeat(32),
+    N8N_AGENT_KEY: 'test-agent-key-for-local-integration-only', N8N_INGEST_KEY: ingestKey,
+    SMTP_URL: process.env.MAILGASTO_TEST_SMTP_URL ?? 'smtp://localhost:1026',
+    SMTP_FROM: 'MailGasto IA <mailgasto@example.test>',
+  });
+  const app = await createApp(config, false);
+  const db = app.get(Database);
+  const email = 'callbacks-' + randomUUID() + '@example.test';
+  t.after(async () => {
+    try { await db.query('DELETE FROM accounts WHERE email=$1', [email]); }
+    finally { await app.close(); }
+  });
+  await app.listen(0, '127.0.0.1');
+  const callbackUrl = (await app.getUrl()) + '/v1/internal/gmail/results';
+  const post = (body: unknown) => fetch(callbackUrl, { method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-MailGasto-Ingest': ingestKey }, body: JSON.stringify(body) });
+  const [{ id: mailbox, generation }] = (await db.query(
+    'WITH account AS (INSERT INTO accounts (email,name,password_hash,verified_at) VALUES ($1,$2,$3,now()) RETURNING id,email) ' +
+    "INSERT INTO mailboxes (account_id,email,source,state) SELECT id,email,'oauth','active' FROM account RETURNING id,generation",
+    [email, 'Synthetic callback test', password],
+  )).rows;
+  async function seed(messageId: string, authenticated: boolean, forwarded: boolean, attempts = 1) {
+    const attemptId = randomUUID();
+    const [{ id: deliveryId, received_at: received }] = (await db.query(
+      'INSERT INTO gmail_deliveries (mailbox_id,generation,message_id,attempt_id,received_at,authenticated,forwarded,attempts,due_at) ' +
+      "VALUES ($1,$2,$3,$4,now()+interval '1 second',$5,$6,$7,now()+interval '3 minutes') RETURNING id,received_at",
+      [mailbox, generation, messageId, attemptId, authenticated, forwarded, attempts],
+    )).rows;
+    return { source: 'oauth', messageId, attemptId, deliveryId, receivedAt: received.toISOString() };
+  }
+  const registered = { status: 'registered', confidence: 1, provider: 'other', forwarded: false,
+    movement: { amountMinor: '2500000', currency: 'COP', date: '2026-11-10', direction: 'expense',
+      description: 'Restaurante Demo', category: 'alimentacion', paymentMethod: null } };
+
+  const unauthenticated = await seed('forged-authentication', false, false);
+  assert.equal((await post({ ...unauthenticated, ...registered, authenticated: true })).status, 400);
+  assert.deepEqual(await (await post({ ...unauthenticated, ...registered, references: ['pse:1234567'] })).json(), { outcome: 'stored' });
+  const forwarded = await seed('forged-forwarded', true, true);
+  assert.deepEqual(await (await post({ ...forwarded, ...registered })).json(), { outcome: 'stored' });
+  const { rows: untrusted } = await db.query(
+    'SELECT n.status,n.forwarded,n.reported_amount_minor::text,t.id AS movement,s.fingerprint FROM notices n ' +
+    'LEFT JOIN transactions t ON t.notice_id=n.id LEFT JOIN gmail_operation_references s ON s.notice_id=n.id ' +
+    'WHERE n.mailbox_id=$1 AND n.message_id=ANY($2) ORDER BY n.message_id', [mailbox, ['forged-authentication', 'forged-forwarded']],
+  );
+  assert.deepEqual(untrusted, [false, true].map(forwarded => ({ status: 'pending', forwarded,
+    reported_amount_minor: '2500000', movement: null, fingerprint: null })));
+
+  const retry = await seed('retry-model-json', true, false);
+  const retryResult = { ...retry, status: 'retry', reason: 'invalid_model_output', provider: 'other', forwarded: false };
+  assert.deepEqual(await (await post(retryResult)).json(), { outcome: 'retry_scheduled' });
+  const retryState = () => db.query('SELECT retry_requested_at,due_at,completed_at FROM gmail_deliveries WHERE id=$1', [retry.deliveryId]);
+  const retryBefore = (await retryState()).rows;
+  assert.ok(retryBefore[0].retry_requested_at);
+  assert.equal(retryBefore[0].completed_at, null);
+  assert.deepEqual(await (await post(retryResult)).json(), { outcome: 'retry_scheduled' });
+  assert.deepEqual((await retryState()).rows, retryBefore);
+  assert.equal((await db.query('SELECT 1 FROM notices WHERE mailbox_id=$1 AND message_id=$2', [mailbox, retry.messageId])).rowCount, 0);
+
+  const exhausted = await seed('retry-model-exhausted', true, false, 5);
+  const finalResult = { ...retryResult, ...exhausted, reason: 'ollama_unavailable' };
+  assert.deepEqual(await (await post(finalResult)).json(), { outcome: 'stored' });
+  assert.deepEqual(await (await post(finalResult)).json(), { outcome: 'duplicate' });
+  const { rows: terminal } = await db.query(
+    'SELECT n.status,n.reason,d.completed_at IS NOT NULL AS complete FROM notices n JOIN gmail_deliveries d ' +
+    'ON d.mailbox_id=n.mailbox_id AND d.message_id=n.message_id WHERE d.id=$1', [exhausted.deliveryId],
+  );
+  assert.deepEqual(terminal, [{ status: 'error', reason: 'extractor_unavailable', complete: true }]);
+
+  for (const messageId of ['separate-payment-a', 'separate-payment-b']) {
+    const identity = await seed(messageId, true, false);
+    assert.deepEqual(await (await post({ ...identity, ...registered })).json(), { outcome: 'stored' });
+    assert.deepEqual(await (await post({ ...identity, ...registered })).json(), { outcome: 'duplicate' });
+  }
+  assert.equal((await db.query('SELECT 1 FROM transactions t JOIN notices n ON n.id=t.notice_id ' +
+    "WHERE n.mailbox_id=$1 AND n.message_id LIKE 'separate-payment-%'", [mailbox])).rowCount, 2);
 });
