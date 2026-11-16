@@ -3,8 +3,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'support/import_refresh_flow.dart';
 import 'support/received_date_flow.dart';
 import 'support/sms_opt_in_flow.dart';
+import 'support/sms_session_flow.dart';
 
 void main() {
+  testWidgets(
+    'La sesión UI no revoca SMS y el cambio de cuenta los aísla',
+    verifySmsSessionIndependence,
+  );
   testWidgets(
     'Actualiza importaciones al navegar, reanudar y terminar la revisión',
     verifyImportRefresh,

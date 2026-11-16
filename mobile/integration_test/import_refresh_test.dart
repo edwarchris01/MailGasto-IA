@@ -4,9 +4,14 @@ import 'package:integration_test/integration_test.dart';
 import '../test/support/import_refresh_flow.dart';
 import '../test/support/received_date_flow.dart';
 import '../test/support/sms_opt_in_flow.dart';
+import '../test/support/sms_session_flow.dart';
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  testWidgets(
+    'Android conserva SMS al expirar UI y los detiene al salir',
+    verifySmsSessionIndependence,
+  );
   testWidgets(
     'Android actualiza las importaciones sin refresco manual',
     verifyImportRefresh,

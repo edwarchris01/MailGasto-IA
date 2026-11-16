@@ -74,7 +74,15 @@ class ProfileScreen extends ConsumerWidget {
           ),
           const SizedBox(height: 46),
           OutlinedButton.icon(
-            onPressed: () => ref.read(authProvider.notifier).logout(),
+            onPressed: () async {
+              try {
+                await ref.read(authProvider.notifier).logout();
+              } catch (error) {
+                if (context.mounted) {
+                  showMessage(context, failureMessage(error));
+                }
+              }
+            },
             icon: const Icon(Icons.logout_rounded),
             label: const Text('Cerrar sesión'),
           ),

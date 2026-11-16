@@ -18,6 +18,8 @@ La app registra el dispositivo con su sesión y recibe una credencial restringid
 
 Desactivar o cerrar sesión cancela trabajos y borra la cola y la credencial local; también se solicita la revocación del dispositivo. El servidor revoca las credenciales relacionadas al cerrar sesión. Android puede aplazar trabajos y una detención forzada requiere volver a abrir la app. No se conceden permisos mediante ADB ni se alteran restricciones de batería o del instalador.
 
+El vencimiento de la sesión de consulta no revoca el consentimiento independiente para SMS. Volver a iniciar sesión en la misma cuenta conserva ese estado, incluyendo una conexión revocada que sigue detenida. Cambiar de cuenta limpia la credencial y la cola anteriores antes de guardar la nueva sesión. Si la limpieza local falla al cerrar sesión, la app informa el error y mantiene la sesión abierta para no aparentar que detuvo un acceso que sigue activo.
+
 Los movimientos importados tienen `source=sms`; el detalle identifica su origen y permite corregir monto y fecha conservando la fecha original. La idempotencia por SMS usa remitente, recepción y contenido; el servidor sólo une SMS y correo mediante referencias de operación explícitas, nunca por coincidencia de monto solamente.
 
 Pruebas: `./gradlew.bat :app:testDebugUnitTest` en `android` verifica detección, exclusión de OTP, identidad y recuperación por versión/cursor. Las pruebas Flutter y el runner físico aislado incluyen activación con permisos simulados, denegación, limpieza al desactivar y corrección de un SMS sintético. No acceden a SMS reales ni conceden permisos.

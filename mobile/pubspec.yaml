@@ -1,7 +1,7 @@
 name: mailgasto
 description: Consulta de gastos registrados desde avisos bancarios.
 publish_to: none
-version: 0.1.4+6
+version: 0.1.4+7
 
 environment:
   sdk: ^3.11.5

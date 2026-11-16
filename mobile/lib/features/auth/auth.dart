@@ -133,15 +133,11 @@ class AuthViewModel extends AsyncNotifier<Account?> {
     api.onUnauthorized = (token) => unawaited(_expire(token));
     final storage = ref.read(secureStorageProvider);
     api.session = await storage.read(key: _key);
-    if (api.session == null) {
-      await _stopSms(null);
-      return null;
-    }
+    if (api.session == null) return null;
     try {
       return await _repository.restore();
     } on ApiFailure catch (error) {
       if (error.status != 401) rethrow;
-      await _stopSms(api.session);
       api.session = null;
       await storage.delete(key: _key);
       return null;
@@ -154,6 +150,24 @@ class AuthViewModel extends AsyncNotifier<Account?> {
   }
 
   Future<void> _save(({Account account, String token}) result) async {
+    final bridge = ref.read(smsBridgeProvider);
+    if (bridge.supported) {
+      SmsStatus? sms;
+      try {
+        sms = await bridge.status();
+      } catch (_) {
+        // An unreadable device binding cannot be reused by a newly signed-in account.
+        await bridge.clear();
+      }
+      if (sms != null &&
+          (sms.accountId != null ||
+              sms.serverId != null ||
+              sms.enabled ||
+              sms.queued > 0) &&
+          sms.accountId != result.account.id) {
+        await _stopSms(_api.session, requireClear: true);
+      }
+    }
     await ref.read(secureStorageProvider).write(key: _key, value: result.token);
     _api.session = result.token;
     state = AsyncData(result.account);
@@ -225,6 +239,7 @@ class AuthViewModel extends AsyncNotifier<Account?> {
 
   Future<void> logout() async {
     final token = _api.session;
+    await _stopSms(token, requireClear: true);
     if (token == null) return;
     unawaited(_repository.revoke(token).catchError((Object _) {}));
     await _expire(token);
@@ -232,7 +247,6 @@ class AuthViewModel extends AsyncNotifier<Account?> {
 
   Future<void> _expire(String token) async {
     if (_api.session != token) return;
-    await _stopSms(token);
     _api.session = null;
     state = const AsyncLoading();
     try {
@@ -243,7 +257,7 @@ class AuthViewModel extends AsyncNotifier<Account?> {
     }
   }
 
-  Future<void> _stopSms(String? token) async {
+  Future<void> _stopSms(String? token, {bool requireClear = false}) async {
     final bridge = ref.read(smsBridgeProvider);
     if (!bridge.supported) return;
     String? serverId;
@@ -268,6 +282,7 @@ class AuthViewModel extends AsyncNotifier<Account?> {
       }
     } catch (_) {
       // The server also revokes SMS credentials on explicit logout.
+      if (requireClear) rethrow;
     }
   }
 }
