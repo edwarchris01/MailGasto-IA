@@ -10,6 +10,7 @@ const formValues = form => Object.fromEntries(new FormData(form));
 const fragment = new URLSearchParams(location.hash.slice(1));
 history.replaceState(null, '', location.pathname);
 let page = 1;
+let movementPage = 1;
 let session = '';
 
 async function api(path, method = 'GET', body) {
@@ -47,7 +48,7 @@ async function workspace(owner) {
   $('access').hidden = true;
   $('workspace').hidden = false;
   $('delete-confirm').hidden = !fragment.has('delete');
-  await Promise.all([loadMailboxes(), loadNotices(), loadConversations()]);
+  await Promise.all([loadMailboxes(), loadMovements(), loadNotices(), loadConversations()]);
 }
 
 async function loadMailboxes() {
@@ -71,6 +72,39 @@ async function loadMailboxes() {
     }
     $('mailboxes').append(item);
   }
+}
+
+async function loadMovements() {
+  const query = new URLSearchParams(Object.entries(formValues($('movement-filter'))).filter(([, value]) => value));
+  query.set('page', movementPage);
+  const report = await api('movements?' + query);
+  const sources = { email: 'Correo', sms: 'SMS Nequi', manual: 'Manual' };
+  $('movements').replaceChildren();
+  $('movement-detail').replaceChildren();
+  for (const row of report.items) {
+    const direction = row.direction === 'income' ? 'Ingreso' : 'Gasto';
+    const li = element('li', [row.transaction_date, direction, money(row.amount_minor, row.currency),
+      row.description, sources[row.source]].filter(Boolean).join(' · '));
+    const detail = element('button', 'Ver movimiento');
+    action(detail, 'click', async () => {
+      const value = await api('movements/' + row.id);
+      $('movement-detail').replaceChildren(element('p', [direction, money(value.amount_minor, value.currency),
+        value.transaction_date, value.description, categoryNames[value.category], sources[value.source]].filter(Boolean).join(' · ')));
+      if (value.date_source === 'received_at' && value.received_at) {
+        const receipt = new Intl.DateTimeFormat('es-CO', {
+          timeZone: 'America/Bogota', dateStyle: 'medium', timeStyle: 'short',
+        }).format(new Date(value.received_at));
+        $('movement-detail').append(element('p', 'El mensaje no indicaba fecha de operación. '
+          + 'Recepción usada como referencia: ' + receipt + ' (hora de Colombia).'));
+      }
+      if (value.source !== 'manual') $('movement-detail').append(element('p', 'Puedes corregir monto y fecha desde la app.'));
+    });
+    li.append(detail);
+    $('movements').append(li);
+  }
+  if (!report.items.length) $('movements').append(element('li', 'No hay movimientos en este periodo.'));
+  $('movement-previous').hidden = movementPage === 1;
+  $('movement-next').hidden = !report.hasMore;
 }
 
 async function loadNotices() {
@@ -188,6 +222,9 @@ action($('logout'), 'click', async () => { await api('auth/logout', 'POST'); loc
 action($('link'), 'click', () => authorize());
 action($('link-existing'), 'click', async () => { await api('mailboxes/gmail/existing', 'POST'); await loadMailboxes(); });
 action($('filter'), 'submit', async () => { page = 1; await loadNotices(); });
+action($('movement-filter'), 'submit', async () => { movementPage = 1; await loadMovements(); });
+action($('movement-previous'), 'click', async () => { movementPage--; await loadMovements(); });
+action($('movement-next'), 'click', async () => { movementPage++; await loadMovements(); });
 action($('previous'), 'click', async () => { page--; await loadNotices(); });
 action($('next'), 'click', async () => { page++; await loadNotices(); });
 action($('new-chat'), 'click', async () => { session = (await api('chat/sessions', 'POST')).id; await loadConversations(); });

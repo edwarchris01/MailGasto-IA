@@ -46,7 +46,19 @@
       <ul id="mailboxes"></ul>
     </section>
     <section>
-      <h3>Historial</h3>
+      <h3>Movimientos</h3>
+      <form id="movement-filter" class="row">
+        <label>Desde <input name="from" type="date"></label><label>Hasta <input name="to" type="date"></label>
+        <label>Tipo <select name="direction"><option value="">Ingresos y gastos</option><option value="income">Ingresos</option><option value="expense">Gastos</option></select></label>
+        <label>Origen <select name="source"><option value="">Todos</option><option value="email">Correo</option><option value="sms">SMS Nequi</option><option value="manual">Manual</option></select></label>
+        <button>Actualizar movimientos</button>
+      </form>
+      <ul id="movements"></ul>
+      <button id="movement-previous" hidden>Anterior</button><button id="movement-next" hidden>Siguiente</button>
+      <div id="movement-detail" aria-live="polite"></div>
+    </section>
+    <section>
+      <h3>Avisos de correo</h3>
       <form id="filter" class="row">
         <label>Desde <input name="from" type="date"></label><label>Hasta <input name="to" type="date"></label>
         <label>Categoría <select name="category" id="categories"><option value="">Todas</option></select></label>
