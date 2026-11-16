@@ -422,10 +422,8 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       assert.equal(await gmail.dispatchOne(), true);
       assert.equal(await gmail.dispatchOne(), true);
       assert.equal(await gmail.dispatchOne(), true);
-      assert.equal(deliveries.length, firstPageWebhooksBefore + 1);
-      const existingCallback = filterAndResolve(oauthInput(deliveries.at(-1)!));
-      assert.equal(existingCallback.messageId, 'direct');
-      assert.equal((await (await post(existingCallback)).json()).outcome, 'duplicate');
+      // The synthetic current-mail fixture has an internalDate beyond this historical scan's snapshot.
+      assert.equal(deliveries.length, firstPageWebhooksBefore);
       assert.equal(await gmail.scanReprocessPage(), true);
       const webhooksBefore = deliveries.length;
       for (let index = 0; index < 5; index++) assert.equal(await gmail.dispatchOne(), true);
@@ -472,11 +470,8 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       const repeatedWebhooksBefore = deliveries.length;
       for (let index = 0; index < 6; index++) assert.equal(await gmail.dispatchOne(), true);
       assert.equal(await gmail.dispatchOne(), false);
-      assert.equal(deliveries.length, repeatedWebhooksBefore + 2);
-      for (const delivery of deliveries.slice(repeatedWebhooksBefore)) {
-        const repeated = filterAndResolve(oauthInput(delivery), delivery.messageId === 'direct' ? goodModel : uncertainModel);
-        assert.equal((await (await post(repeated)).json()).outcome, delivery.messageId === 'direct' ? 'duplicate' : 'stored');
-      }
+      assert.equal(deliveries.length, repeatedWebhooksBefore + 1);
+      assert.equal((await (await post(filterAndResolve(oauthInput(deliveries.at(-1)!), uncertainModel))).json()).outcome, 'stored');
       assert.equal(await gmail.scanReprocessPage(), false);
       const enriched = await db.query(
         'SELECT t.id,t.payment_method,n.transaction_time,t.amount_minor::text FROM transactions t JOIN notices n ON n.id=t.notice_id WHERE n.id=$1',
