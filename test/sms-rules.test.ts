@@ -61,6 +61,37 @@ test('a destination mention or arbitrary numeric sender does not identify a Nequ
     ['Bancolombia'], false).status, 'ignored');
 });
 
+test('synthetic equivalent incoming-money verbs register while promises, requests and negations do not', () => {
+  for (const [body, minor] of [
+    ['Nequi: Ana te envió $300.000.', '30000000'],
+    ['Nequi: Te llegó plata por $50.000.', '5000000'],
+    ['Nequi: Has recibido $50.000.', '5000000'],
+    ['Has recibido COP 50.000 en tu Nequi.', '5000000'],
+    ['Ana te envió $50.000 en tu Nequi.', '5000000'],
+  ]) {
+    assert.equal(isNequiSmsCandidate({ sender, body }), true, body);
+    const result = parse(body);
+    assert.equal(result.status, 'registered', body);
+    assert.ok(result.status === 'registered');
+    assert.deepEqual([result.movement.amountMinor, result.movement.direction, result.movement.category], [minor, 'income', 'ingresos']);
+    assert.doesNotMatch(JSON.stringify(result), /Ana/);
+  }
+  for (const body of [
+    'Nequi: Ana te enviará $300.000.',
+    'Nequi: Ana te va a enviar $300.000.',
+    'Nequi: Te llegará plata por $50.000.',
+    'Nequi: No has recibido $50.000.',
+    'Nequi: No te llegó plata por $50.000.',
+    'Nequi: Has recibido una solicitud de pago por $50.000.',
+    'Nequi: Ana te envió una solicitud de pago por $50.000.',
+    'Nequi: Si Ana te envió $50.000, revisa los movimientos.',
+    'Nequi: Tal vez Ana te envió $50.000.',
+  ]) {
+    assert.equal(isNequiSmsCandidate({ sender, body }), false, body);
+    assert.equal(parse(body).status, 'ignored', body);
+  }
+});
+
 test('synthetic incoming SMS uses the full Bogota receipt clock when no operation date exists', () => {
   for (const [amount, minor] of [['300.000', '30000000'], ['50.000', '5000000']]) {
     const result = parse('Nequi: Recibiste ' + amount + ' de PERSONA SINTETICA por Bre-B.');
@@ -94,6 +125,7 @@ test('SMS rejects OTPs and access or withdrawal codes before considering monetar
     'Nequi: Recibiste tu codigo OTP 123456.',
     'Nequi: Codigo para retirar 654321 por COP 80.000.',
     'Nequi: Tu codigo es 123456. Pagaste COP 80.000.',
+    'Nequi: Recibiste 123456, este es tu codigo.',
     'Nequi: Tu PIN 1234 autoriza una compra de COP 80.000.',
   ]) {
     assert.deepEqual(parse(body), { status: 'ignored', reason: 'security_message' }, body);
@@ -140,6 +172,7 @@ test('SMS keeps only explicit PSE operation references shared with email and nev
   assert.equal(result.status, 'registered');
   assert.ok(result.status === 'registered');
   assert.deepEqual(result.references, ['pse:123456789012']);
+  assert.equal(parse('Nequi: Pagaste COP 80.000 mediante PSE. Tu codigo unico de seguimiento: 123456789012.').status, 'registered');
   for (const body of [
     'Nequi: Pagaste COP 80.000 el 15/11/2026. Referencia: 123456789012.',
     'Nequi: Pagaste COP 80.000 mediante PSE el 15/11/2026. CUS: 123456789012. CUS: 123456789013.',
