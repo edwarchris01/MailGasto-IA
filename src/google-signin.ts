@@ -26,15 +26,15 @@ export class GoogleSignin {
     }
   }
 
-  async authorize(challenge: string) {
+  async authorize(challenge: string, platform: 'mobile' | 'web' = 'mobile') {
     this.requireGoogle();
     const state = token();
     const verifier = token();
     await this.db.transaction(async client => {
       await client.query('DELETE FROM mobile_google_signins WHERE expires_at<=now()');
       await client.query(
-        "INSERT INTO mobile_google_signins (state_hash,challenge,verifier,expires_at) VALUES ($1,$2,$3,now()+interval '10 minutes')",
-        [hash(state), challenge, encrypt(verifier, this.config.encryptionKey)],
+        "INSERT INTO mobile_google_signins (state_hash,challenge,verifier,expires_at,client_platform) VALUES ($1,$2,$3,now()+interval '10 minutes',$4)",
+        [hash(state), challenge, encrypt(verifier, this.config.encryptionKey), platform],
       );
     });
     const params = new URLSearchParams({
@@ -43,6 +43,13 @@ export class GoogleSignin {
       code_challenge_method: 'S256', code_challenge: proof(verifier),
     });
     return 'https://accounts.google.com/o/oauth2/v2/auth?' + params;
+  }
+
+  async returnPlatform(state: string): Promise<'mobile' | 'web'> {
+    const { rows: [request] } = await this.db.query<{ client_platform: 'mobile' | 'web' }>(
+      'SELECT client_platform FROM mobile_google_signins WHERE state_hash=$1', [hash(state)],
+    );
+    return request?.client_platform === 'web' ? 'web' : 'mobile';
   }
 
   async receive(state: string, code?: string) {

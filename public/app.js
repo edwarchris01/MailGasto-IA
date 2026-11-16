@@ -23,7 +23,7 @@ async function api(path, method = 'GET', body) {
 function action(element, event, handler) {
   element.addEventListener(event, async e => {
     if (event === 'submit') e.preventDefault();
-    const button = element.matches('button') ? element : element.querySelector('button');
+    const button = element.matches('button') ? element : element.querySelector('button[type="submit"], button:not([type])');
     if (button?.disabled) return;
     if (button) button.disabled = true;
     try { await handler(); } catch (error) { flash(error.message); }
@@ -134,6 +134,19 @@ for (const [key, label] of Object.entries(categoryNames)) {
   option.value = key;
   $('categories').append(option);
 }
+action($('google-signin'), 'click', async () => {
+  const encode = bytes => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const verifier = encode(crypto.getRandomValues(new Uint8Array(32)));
+  const challenge = encode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
+  sessionStorage.setItem('mailgasto_google_verifier', verifier);
+  try {
+    const { url } = await api('auth/google/authorize', 'POST', { challenge });
+    location.assign(url);
+  } catch (error) {
+    sessionStorage.removeItem('mailgasto_google_verifier');
+    throw error;
+  }
+});
 action($('login'), 'submit', async () => {
   const owner = await api('auth/login', 'POST', formValues($('login')));
   $('login').reset();
@@ -191,6 +204,17 @@ if (fragment.get('gmail') === 'cancelled') flash('Se canceló la vinculación de
 if (fragment.has('reset')) {
   $('access').hidden = true;
   $('reset-password').hidden = false;
+} else if (fragment.has('google')) {
+  const verifier = sessionStorage.getItem('mailgasto_google_verifier');
+  sessionStorage.removeItem('mailgasto_google_verifier');
+  if (fragment.get('google') === 'complete' && fragment.has('receipt') && verifier) {
+    flash('Completando el acceso con Google…');
+    api('auth/google/complete', 'POST', { receipt: fragment.get('receipt'), verifier })
+      .then(async owner => { flash(''); await workspace(owner); })
+      .catch(() => flash('No se pudo completar el acceso. Vuelve a intentar con Google.'));
+  } else {
+    flash(fragment.get('google') === 'cancelled' ? 'Se canceló el acceso con Google.' : 'Vuelve a iniciar el acceso con Google desde este navegador.');
+  }
 } else {
   api('auth/me').then(workspace).catch(() => {});
 }

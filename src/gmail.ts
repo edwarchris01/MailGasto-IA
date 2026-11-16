@@ -15,6 +15,10 @@ const gmailRoot = 'https://gmail.googleapis.com/gmail/v1/users/me/';
 const tokenUrl = 'https://oauth2.googleapis.com/token';
 const maxRawSize = 1_500_000;
 const maxReprocessAttempts = 5;
+// Bump when extraction rules change: unresolved notices receive one new review.
+export const gmailClassifierVersion = '2026-11-16.1';
+const recoverableDeliveryErrors = ['webhook_timeout', 'webhook_unavailable', 'callback_timeout',
+  'gmail_processing_failed', 'attempts_exhausted', 'extractor_unavailable', 'ollama_unavailable', 'invalid_model_output'];
 
 class GoogleError extends Error {
   constructor(readonly status: number, readonly code?: string) {
@@ -48,8 +52,9 @@ type Mailbox = {
 };
 type Job = Mailbox & { delivery_id: string; message_id: string; attempts: number; reprocess_id: string | null;
   from_at: Date | null; to_at: Date | null; previous_attempts: number;
-  previous_webhook_accepted_at: Date | null; previous_retry_requested_at: Date | null };
-type Scan = Mailbox & { run_id: string; from_at: Date; to_at: Date; page_token: string | null; scan_attempts: number };
+  previous_webhook_accepted_at: Date | null; previous_retry_requested_at: Date | null; last_error: string | null };
+type Scan = Mailbox & { run_id: string; from_at: Date; to_at: Date; page_token: string | null; scan_attempts: number;
+  automatic: boolean; classifier_version: string | null };
 type Access = { token: string; expiresAt: number };
 const isRevoked = (error: unknown) => error instanceof GoogleError && (error.code === 'invalid_grant' || error.status === 401);
 const messageIds = (ids: string[]) => [...new Set(ids.filter(id => typeof id === 'string' && messageIdPattern.test(id)))];
@@ -70,13 +75,19 @@ export class Gmail {
       "($2::boolean AND m.source='oauth') AS openai_available," +
       'CASE WHEN r.id IS NOT NULL THEN jsonb_build_object(' +
       "'from',r.from_at,'to',r.to_at,'finishedAt',r.finished_at,'failure',r.failure,'summary',COALESCE(r.summary,s.summary)," +
-      "'scanning',r.scan_finished_at IS NULL,'queued',q.total,'retrying',q.attempted) END AS reprocess " +
+      "'scanning',r.scan_finished_at IS NULL,'queued',q.total,'retrying',q.attempted,'automatic',r.automatic) END AS reprocess," +
+      "jsonb_build_object('queued',d.queued,'retrying',d.retrying,'failed',d.failed,'lastError',d.last_error) AS delivery " +
       'FROM mailboxes m LEFT JOIN LATERAL (SELECT * FROM gmail_reprocess_runs ' +
       'WHERE mailbox_id=m.id ORDER BY started_at DESC LIMIT 1) r ON true ' +
       'LEFT JOIN LATERAL (SELECT jsonb_object_agg(outcome,total) AS summary FROM (' +
       'SELECT outcome,count(*)::int AS total FROM gmail_reprocess_results WHERE run_id=r.id GROUP BY outcome) totals) s ON r.finished_at IS NULL ' +
       'LEFT JOIN LATERAL (SELECT count(*)::int AS total,count(*) FILTER (WHERE attempts>0)::int AS attempted ' +
       'FROM gmail_deliveries WHERE reprocess_id=r.id AND completed_at IS NULL) q ON r.finished_at IS NULL ' +
+      'LEFT JOIN LATERAL (SELECT count(*) FILTER (WHERE completed_at IS NULL)::int AS queued,' +
+      'count(*) FILTER (WHERE completed_at IS NULL AND (attempts>1 OR last_error IS NOT NULL))::int AS retrying,' +
+      "count(*) FILTER (WHERE completed_at IS NOT NULL AND outcome='error')::int AS failed," +
+      '(array_agg(last_error ORDER BY last_error_at DESC NULLS LAST) FILTER (WHERE last_error IS NOT NULL))[1] AS last_error ' +
+      'FROM gmail_deliveries WHERE mailbox_id=m.id AND generation=m.generation) d ON true ' +
       'WHERE m.account_id=$1 ORDER BY m.linked_at DESC',
       [accountId, Boolean(this.config.OPENAI_API_KEY)],
     );
@@ -112,10 +123,34 @@ export class Gmail {
       const now = DateTime.now().setZone(timezone);
       const from = now.startOf('month');
       const { rows: [run] } = await client.query<{ id: string }>(
-        'INSERT INTO gmail_reprocess_runs (mailbox_id,from_at,to_at) VALUES ($1,$2,$3) RETURNING id',
-        [mailboxId, from.toJSDate(), now.toMillis() === from.toMillis() ? now.plus({ milliseconds: 1 }).toJSDate() : now.toJSDate()],
+        'INSERT INTO gmail_reprocess_runs (mailbox_id,from_at,to_at,classifier_version) VALUES ($1,$2,$3,$4) RETURNING id',
+        [mailboxId, from.toJSDate(), now.toMillis() === from.toMillis() ? now.plus({ milliseconds: 1 }).toJSDate() : now.toJSDate(),
+          gmailClassifierVersion],
       );
       return run!;
+    });
+  }
+
+  async reconcileOne() {
+    if (!this.config.GOOGLE_CLIENT_ID || !this.config.GOOGLE_CLIENT_SECRET) return false;
+    return this.db.transaction(async client => {
+      const { rows: [mailbox] } = await client.query<{ id: string }>(
+        "SELECT m.id FROM mailboxes m WHERE m.source='oauth' AND m.state='active' " +
+        'AND (m.reconciliation_due_at<=now() OR m.reconciliation_version IS DISTINCT FROM $1) ' +
+        'AND NOT EXISTS (SELECT 1 FROM gmail_reprocess_runs r WHERE r.mailbox_id=m.id AND r.finished_at IS NULL) ' +
+        'ORDER BY m.reconciliation_due_at FOR UPDATE OF m SKIP LOCKED LIMIT 1', [gmailClassifierVersion],
+      );
+      if (!mailbox) return false;
+      const now = DateTime.now().setZone(timezone);
+      const from = now.startOf('month');
+      await client.query(
+        'INSERT INTO gmail_reprocess_runs (mailbox_id,from_at,to_at,automatic,classifier_version) VALUES ($1,$2,$3,true,$4)',
+        [mailbox.id, from.toJSDate(), now.toMillis() === from.toMillis() ? now.plus({ milliseconds: 1 }).toJSDate() : now.toJSDate(),
+          gmailClassifierVersion],
+      );
+      await client.query("UPDATE mailboxes SET reconciliation_due_at=now()+interval '1 day',reconciliation_version=$2 WHERE id=$1",
+        [mailbox.id, gmailClassifierVersion]);
+      return true;
     });
   }
 
@@ -242,7 +277,7 @@ export class Gmail {
         "history_id=CASE WHEN mailboxes.state='disconnected' THEN excluded.history_id ELSE COALESCE(mailboxes.history_id,excluded.history_id) END, " +
         "linked_at=CASE WHEN mailboxes.state='disconnected' THEN excluded.linked_at ELSE mailboxes.linked_at END, " +
         "last_synced_at=CASE WHEN mailboxes.state='disconnected' THEN excluded.last_synced_at ELSE mailboxes.last_synced_at END, " +
-        "sync_due_at=now(),sync_lease=null,generation=gen_random_uuid() " +
+        "sync_due_at=now(),sync_lease=null,generation=gen_random_uuid(),reconciliation_due_at=now() " +
         "WHERE mailboxes.account_id=excluded.account_id AND mailboxes.source='oauth' RETURNING id,generation",
         [accountId, address, encrypt(tokens.refresh_token!, this.config.encryptionKey), profile.historyId, started],
       );
@@ -354,10 +389,10 @@ export class Gmail {
         [mailbox.id, mailbox.generation, mailbox.sync_lease]);
       if (!active.rowCount) return;
       await client.query(
-        'INSERT INTO gmail_deliveries (mailbox_id,generation,message_id) ' +
-        'SELECT $1,$2,ids.message_id FROM unnest($3::text[]) AS ids(message_id) ' +
+        'INSERT INTO gmail_deliveries (mailbox_id,generation,message_id,classifier_version) ' +
+        'SELECT $1,$2,ids.message_id,$4 FROM unnest($3::text[]) AS ids(message_id) ' +
         'WHERE NOT EXISTS (SELECT 1 FROM notices n WHERE n.mailbox_id=$1 AND n.message_id=ids.message_id) ' +
-        'ON CONFLICT (mailbox_id,generation,message_id) DO NOTHING', [mailbox.id, mailbox.generation, distinct],
+        'ON CONFLICT (mailbox_id,generation,message_id) DO NOTHING', [mailbox.id, mailbox.generation, distinct, gmailClassifierVersion],
       );
     });
   }
@@ -383,7 +418,8 @@ export class Gmail {
       'SELECT r.id FROM gmail_reprocess_runs r JOIN mailboxes m ON m.id=r.mailbox_id ' +
       "WHERE r.scan_finished_at IS NULL AND r.scan_due_at<=now() AND m.state='active' " +
       'ORDER BY r.scan_due_at FOR UPDATE OF r SKIP LOCKED LIMIT 1) RETURNING *) ' +
-      'SELECT m.*,r.id AS run_id,r.from_at,r.to_at,r.page_token,r.scan_attempts FROM claimed r JOIN mailboxes m ON m.id=r.mailbox_id',
+      'SELECT m.*,r.id AS run_id,r.from_at,r.to_at,r.page_token,r.scan_attempts,r.automatic,r.classifier_version ' +
+      'FROM claimed r JOIN mailboxes m ON m.id=r.mailbox_id',
       [lease],
     );
     if (!scan) return false;
@@ -425,24 +461,38 @@ export class Gmail {
       );
       if (!saved.rowCount || !ids.length) return;
       await client.query(
-        "WITH candidates AS (SELECT ids.message_id, (CASE WHEN n.status='registered' AND t.id IS NOT NULL THEN " +
-        "(n.provider='nequi' OR (n.transaction_time IS NOT NULL AND n.reported_institution IS NOT NULL " +
+        'WITH candidates AS (SELECT ids.message_id, (CASE WHEN $7::boolean THEN ' +
+        "CASE WHEN n.status='registered' AND t.id IS NOT NULL THEN " +
+        "n.reason='user_confirmed' OR (n.transaction_time IS NOT NULL AND n.reported_institution IS NOT NULL " +
+        "AND (t.payment_method IS NOT NULL OR t.direction='income')) OR " +
+        '(d.id IS NOT NULL AND (d.completed_at IS NULL OR d.classifier_version IS NOT DISTINCT FROM $6)) ELSE ' +
+        "COALESCE(n.status NOT IN ('pending','error'),false) OR t.id IS NOT NULL OR " +
+        "COALESCE(d.outcome IN ('registered','ignored','skipped'),false) OR " +
+        '(d.id IS NOT NULL AND d.completed_at IS NULL) OR ' +
+        "(d.outcome='pending' AND d.classifier_version IS NOT DISTINCT FROM $6) OR " +
+        "(d.outcome='error' AND (d.due_at>now() OR (d.classifier_version IS NOT DISTINCT FROM $6 AND " +
+        '(d.recovery_count>=2 OR d.last_error IS NOT NULL AND NOT (d.last_error=ANY($8::text[])))))) END ' +
+        "ELSE CASE WHEN n.status='registered' AND t.id IS NOT NULL THEN " +
+        "(n.reason='user_confirmed' OR (n.transaction_time IS NOT NULL AND n.reported_institution IS NOT NULL " +
         "AND (t.payment_method IS NOT NULL OR t.direction='income'))) " +
-        "ELSE n.status NOT IN ('pending','error') OR t.id IS NOT NULL END OR d.received_at>=$5) AS skip " +
+        "ELSE n.status NOT IN ('pending','error') OR t.id IS NOT NULL END END OR d.received_at>=$5) AS skip " +
         'FROM unnest($4::text[]) AS ids(message_id) LEFT JOIN notices n ON n.mailbox_id=$1 AND n.message_id=ids.message_id ' +
         'LEFT JOIN transactions t ON t.notice_id=n.id ' +
         'LEFT JOIN gmail_deliveries d ON d.mailbox_id=$1 AND d.generation=$2 AND d.message_id=ids.message_id ' +
         'WHERE NOT EXISTS (SELECT 1 FROM gmail_reprocess_results r WHERE r.run_id=$3 AND r.message_id=ids.message_id)),' +
         "skipped AS (INSERT INTO gmail_reprocess_results (run_id,message_id,outcome) SELECT $3,message_id,'skipped' " +
-        'FROM candidates WHERE skip ON CONFLICT DO NOTHING) ' +
-        'INSERT INTO gmail_deliveries (mailbox_id,generation,message_id,reprocess_id) ' +
-        'SELECT $1,$2,message_id,$3 FROM candidates WHERE skip IS NOT TRUE ' +
+        'FROM candidates WHERE skip AND NOT $7::boolean ON CONFLICT DO NOTHING) ' +
+        'INSERT INTO gmail_deliveries (mailbox_id,generation,message_id,reprocess_id,classifier_version) ' +
+        'SELECT $1,$2,message_id,$3,$6 FROM candidates WHERE skip IS NOT TRUE ' +
         'ON CONFLICT (mailbox_id,generation,message_id) DO UPDATE SET reprocess_id=excluded.reprocess_id,' +
         'accepted_at=CASE WHEN gmail_deliveries.completed_at IS NOT NULL THEN excluded.accepted_at ELSE gmail_deliveries.accepted_at END,' +
         'attempts=0,attempt_id=NULL,authenticated=NULL,forwarded=NULL,webhook_accepted_at=NULL,retry_requested_at=NULL,' +
-        'due_at=now(),completed_at=NULL ' +
+        'recovery_count=CASE WHEN $7::boolean AND gmail_deliveries.classifier_version IS NOT DISTINCT FROM $6 ' +
+        "AND gmail_deliveries.outcome='error' THEN gmail_deliveries.recovery_count+1 ELSE 0 END," +
+        'classifier_version=$6,outcome=NULL,due_at=now(),completed_at=NULL ' +
         'WHERE gmail_deliveries.reprocess_id IS DISTINCT FROM excluded.reprocess_id',
-        [scan.id, scan.generation, scan.run_id, ids, scan.to_at],
+        [scan.id, scan.generation, scan.run_id, ids, scan.to_at, scan.classifier_version ?? gmailClassifierVersion,
+          scan.automatic, recoverableDeliveryErrors],
       );
     });
   }
@@ -462,7 +512,7 @@ export class Gmail {
       'next.attempts AS previous_attempts,next.webhook_accepted_at AS previous_webhook_accepted_at,' +
       'next.retry_requested_at AS previous_retry_requested_at) ' +
       'SELECT m.*,claim.id AS delivery_id,claim.message_id,claim.attempts,claim.reprocess_id,r.from_at,r.to_at,' +
-      'claim.previous_attempts,claim.previous_webhook_accepted_at,claim.previous_retry_requested_at ' +
+      'claim.previous_attempts,claim.previous_webhook_accepted_at,claim.previous_retry_requested_at,claim.last_error ' +
       'FROM claim JOIN mailboxes m ON m.id=claim.mailbox_id LEFT JOIN gmail_reprocess_runs r ON r.id=claim.reprocess_id',
       [attemptId, maxGmailDeliveryAttempts],
     );
@@ -473,7 +523,7 @@ export class Gmail {
     }
     try {
       if (job.previous_attempts >= maxGmailDeliveryAttempts) {
-        await this.closeDelivery(job, attemptId, 'error');
+        await this.closeDelivery(job, attemptId, 'error', job.last_error ?? (callbackTimedOut ? 'callback_timeout' : 'attempts_exhausted'));
         logGmailDelivery('retry_exhausted', callbackTimedOut ? 'callback_timeout' : 'attempts_exhausted', job.attempts, startedAt);
         return true;
       }
@@ -489,7 +539,7 @@ export class Gmail {
       if (message.id !== job.message_id ||
           typeof message.raw !== 'string' || !message.raw.length || message.raw.length > maxRawSize ||
           !/^[A-Za-z0-9_-]+={0,2}$/.test(message.raw)) {
-        await this.closeDelivery(job, attemptId, 'error');
+        await this.closeDelivery(job, attemptId, 'error', 'invalid_gmail_message');
         logGmailDelivery('error', 'invalid_gmail_message', job.attempts, startedAt);
         return true;
       }
@@ -549,11 +599,22 @@ export class Gmail {
             categoryFromPseConcept: references.some(ref => ref.startsWith('pse:')) ? classification.categoryFromPseConcept : undefined };
         }
       }
+      if (job.reprocess_id && authenticated && !forwarded && classification.status === 'pending' && classification.provider !== 'other') {
+        const prior = await this.db.query(
+          "SELECT 1 FROM notices n JOIN transactions t ON t.notice_id=n.id WHERE n.mailbox_id=$1 AND n.message_id=$2 AND n.status='registered'",
+          [job.id, job.message_id],
+        );
+        if (prior.rowCount) {
+          // The result service compares the immutable financial values before filling missing bank metadata.
+          await this.results.save({ source: 'oauth', ...identity, ...classification }, { verifiedBank: true });
+          return true;
+        }
+      }
       if (useOpenAi && classification.status === 'pending') {
         classification = await this.extraction.classify(selected, true, authenticated, identity.receivedAt);
       }
       if (useOpenAi || !this.config.N8N_GMAIL_WEBHOOK_URL || classification.status === 'registered' ||
-          job.reprocess_id || classification.status === 'ignored') {
+          classification.status === 'ignored') {
         await this.results.save({ source: 'oauth', ...identity, ...classification },
           {
             verifiedBank: authenticated && classification.status === 'registered' && !classification.forwarded && classification.provider !== 'other',
@@ -578,14 +639,15 @@ export class Gmail {
         await this.closeDelivery(job, attemptId, 'skipped');
         logGmailDelivery('skipped', 'gmail_message_missing', job.attempts, startedAt);
       } else if ((error instanceof GmailWebhookError && error.terminal) || job.attempts >= maxGmailDeliveryAttempts) {
-        await this.closeDelivery(job, attemptId, 'error');
+        await this.closeDelivery(job, attemptId, 'error', reason);
         logGmailDelivery(error instanceof GmailWebhookError && error.terminal ? 'error' : 'retry_exhausted',
           reason, job.attempts, startedAt);
       } else {
         const delay = gmailDeliveryRetryDelay(job.attempts, !!job.reprocess_id);
-        await this.db.query('UPDATE gmail_deliveries SET due_at=now()+make_interval(secs=>$3::double precision) ' +
+        await this.db.query('UPDATE gmail_deliveries SET due_at=now()+make_interval(secs=>$3::double precision),' +
+          'last_error=$4,last_error_at=clock_timestamp() ' +
           'WHERE id=$1 AND attempt_id=$2 AND completed_at IS NULL AND retry_requested_at IS NULL',
-          [job.delivery_id, attemptId, delay]);
+          [job.delivery_id, attemptId, delay, reason]);
         logGmailDelivery('retry_scheduled', reason, job.attempts, startedAt);
       }
     }
@@ -606,8 +668,15 @@ export class Gmail {
     throw new GmailWebhookError('webhook_unavailable');
   }
 
-  private closeDelivery(job: Job, attemptId: string, outcome: 'error' | 'skipped') {
-    return this.db.transaction(client => finishGmailDelivery(client, job.delivery_id, attemptId, outcome));
+  private closeDelivery(job: Job, attemptId: string, outcome: 'error' | 'skipped', reason?: string) {
+    return this.db.transaction(async client => {
+      if (outcome === 'error') await client.query(
+        "UPDATE gmail_deliveries SET last_error=$3,last_error_at=clock_timestamp(),due_at=now()+interval '6 hours' " +
+        'WHERE id=$1 AND attempt_id=$2 AND completed_at IS NULL',
+        [job.delivery_id, attemptId, reason ?? 'gmail_processing_failed'],
+      );
+      await finishGmailDelivery(client, job.delivery_id, attemptId, outcome);
+    });
   }
 
   private async accessToken(mailbox: Mailbox): Promise<string> {

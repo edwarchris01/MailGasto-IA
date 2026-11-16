@@ -158,7 +158,10 @@ export async function finishGmailDelivery(client: PoolClient, id: string, attemp
   outcome: ReprocessOutcome,
 ) {
   await client.query(
-    'WITH closed AS (UPDATE gmail_deliveries SET completed_at=clock_timestamp() ' +
+    'WITH closed AS (UPDATE gmail_deliveries SET completed_at=clock_timestamp(),outcome=$3,' +
+    "last_error=CASE WHEN $3='error' THEN COALESCE(last_error,'extractor_unavailable') END," +
+    "last_error_at=CASE WHEN $3='error' THEN COALESCE(last_error_at,clock_timestamp()) END," +
+    "due_at=CASE WHEN $3='error' THEN GREATEST(due_at,clock_timestamp()+interval '6 hours') ELSE due_at END " +
     'WHERE id=$1 AND attempt_id=$2 AND completed_at IS NULL RETURNING message_id,reprocess_id) ' +
     'INSERT INTO gmail_reprocess_results (run_id,message_id,outcome) ' +
     'SELECT reprocess_id,message_id,$3 FROM closed WHERE reprocess_id IS NOT NULL ON CONFLICT DO NOTHING',
@@ -219,8 +222,9 @@ export class GmailResults {
         if (!oauth || attempts === undefined) return { outcome: 'retry_scheduled' };
         if (attempts < maxGmailDeliveryAttempts) {
           await client.query('UPDATE gmail_deliveries SET retry_requested_at=clock_timestamp(), ' +
+            'last_error=$4,last_error_at=clock_timestamp(), ' +
             'due_at=now()+make_interval(secs=>$3::double precision) WHERE id=$1 AND attempt_id=$2 AND completed_at IS NULL',
-            [result.deliveryId, result.attemptId, gmailDeliveryRetryDelay(attempts, true)]);
+            [result.deliveryId, result.attemptId, gmailDeliveryRetryDelay(attempts, true), result.reason]);
           return { outcome: 'retry_scheduled' };
         }
         logGmailDelivery('retry_exhausted', result.reason, attempts, startedAt);
@@ -233,33 +237,39 @@ export class GmailResults {
       if (result.status === 'registered' || fingerprints.length) {
         await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,1))', [mailbox.account_id]);
       }
-      if (result.status === 'registered' && reprocessId) {
-        const value = result.movement;
-        const { rows: [prior] } = await client.query<ReferencedMovement & { movement_id: string }>(
-          'SELECT n.id,t.id AS movement_id,t.amount_minor::text,t.currency,t.transaction_date::text,t.direction ' +
+      if (reprocessId && (result.status === 'registered' || result.status === 'pending')) {
+        const value = result.status === 'registered' ? result.movement : result.evidence;
+        const { rows: [prior] } = await client.query<ReferencedMovement & { movement_id: string; reason: string | null }>(
+          'SELECT n.id,n.reason,t.id AS movement_id,t.amount_minor::text,t.currency,t.transaction_date::text,t.direction ' +
           'FROM notices n JOIN transactions t ON t.notice_id=n.id ' +
           "WHERE n.mailbox_id=$1 AND n.message_id=$2 AND n.status='registered' FOR UPDATE OF n,t",
           [mailbox.id, result.messageId],
         );
         if (prior) {
-          const same = prior.amount_minor === value.amountMinor && prior.currency === value.currency &&
+          const same = value && prior.amount_minor === value.amountMinor && prior.currency === value.currency &&
             prior.transaction_date === value.date && prior.direction === value.direction;
-          if (same) {
+          if (same && result.status === 'registered' && prior.reason !== 'user_confirmed') {
             await saveFingerprints(client, prior.id, fingerprints);
-            await discardAvalCopies(client, mailbox.account_id, prior.id, value, fingerprints, result.references);
+            await discardAvalCopies(client, mailbox.account_id, prior.id, result.movement, fingerprints, result.references);
           }
-          if (verifiedBank && same) {
+          // A new classifier may correctly leave an old transfer pending because its purpose is unknown.
+          // That does not invalidate the already registered movement or its corroborated payment metadata.
+          if (verifiedBank && result.provider !== 'other' && same && prior.reason !== 'user_confirmed') {
             await client.query(
               'UPDATE notices SET reported_transaction_date=COALESCE(reported_transaction_date,$2),' +
               'transaction_time=COALESCE(transaction_time,$3),reported_payment_method=COALESCE(reported_payment_method,$4),' +
-              'card_type=CASE WHEN COALESCE(reported_payment_method,$4)=' + "'Tarjeta' THEN COALESCE(card_type,$5) ELSE card_type END," +
-              'card_last4=CASE WHEN COALESCE(reported_payment_method,$4)=' + "'Tarjeta' THEN COALESCE(card_last4,$6) ELSE card_last4 END," +
-              'reported_institution=COALESCE(reported_institution,$7) WHERE id=$1',
+              "card_type=CASE WHEN COALESCE(reported_payment_method,$4)='Tarjeta' " +
+              'AND (card_last4 IS NULL OR $6::text IS NULL OR card_last4=$6) THEN COALESCE(card_type,$5) ELSE card_type END,' +
+              "card_last4=CASE WHEN COALESCE(reported_payment_method,$4)='Tarjeta' " +
+              'AND (card_type IS NULL OR $5::text IS NULL OR card_type=$5) THEN COALESCE(card_last4,$6) ELSE card_last4 END,' +
+              'reported_institution=COALESCE(reported_institution,$7),' +
+              "provider=CASE WHEN provider='other' THEN $8 ELSE provider END WHERE id=$1",
               [prior.id, value.date, value.transactionTime ?? null, value.paymentMethod, value.cardType ?? null,
-                value.cardLast4 ?? null, value.reportedInstitution ?? null],
+                value.cardLast4 ?? null, value.reportedInstitution ?? result.provider, result.provider],
             );
             if (value.paymentMethod) await client.query(
-              'UPDATE transactions SET payment_method=$2 WHERE id=$1 AND payment_method IS NULL', [prior.movement_id, value.paymentMethod],
+              'UPDATE transactions t SET payment_method=$2 FROM notices n WHERE t.id=$1 AND t.payment_method IS NULL ' +
+              'AND n.id=t.notice_id AND n.reported_payment_method=$2', [prior.movement_id, value.paymentMethod],
             );
           }
           await finishGmailDelivery(client, result.deliveryId!, result.attemptId!, 'skipped');
@@ -297,11 +307,19 @@ export class GmailResults {
       if (reprocessId && result.status === 'registered') {
           const value = result.movement;
           const matched = await client.query(
-            'SELECT 1 FROM confirmed_movements m WHERE m.account_id=$1 AND m.currency=$2 AND m.direction=$3 ' +
+            'SELECT 1 FROM confirmed_movements m LEFT JOIN notices n ON n.id=m.notice_id ' +
+            'WHERE m.account_id=$1 AND m.currency=$2 AND m.direction=$3 ' +
             'AND ((m.amount_minor=$4 AND m.transaction_date=$5) OR ' +
             '(m.original_amount_minor=$4 AND m.original_transaction_date=$5)) ' +
-            'AND NOT EXISTS (SELECT 1 FROM notices n WHERE n.id=m.notice_id AND n.mailbox_id=$6 AND n.message_id=$7) LIMIT 1',
-            [mailbox.account_id, value.currency, value.direction, value.amountMinor, value.date, mailbox.id, result.messageId],
+            'AND NOT EXISTS (SELECT 1 FROM notices own WHERE own.id=m.notice_id AND own.mailbox_id=$6 AND own.message_id=$7) ' +
+            // Different operation times from the same authenticated bank and payment channel distinguish
+            // two purchases. A manual entry, a missing time, or a different issuer remains ambiguous.
+            'AND NOT COALESCE(($8::boolean AND n.provider=$9 AND n.forwarded=false AND n.reason IS NULL ' +
+            'AND n.transaction_time IS NOT NULL AND left(n.transaction_time,5)<>left($10::text,5) ' +
+            'AND $11::text IS NOT NULL AND n.reported_payment_method=$11),false) LIMIT 1',
+            [mailbox.account_id, value.currency, value.direction, value.amountMinor, value.date, mailbox.id, result.messageId,
+              authenticated && !forwarded && result.provider !== 'other', result.provider,
+              value.transactionTime ?? null, value.paymentMethod],
           );
           if (matched.rowCount) result = duplicateForReview(result);
       }

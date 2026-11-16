@@ -74,6 +74,7 @@ const noChargeTrial = /\b(?:suscripcion de prueba|prueba gratuita|free trial)\b/
 const confirmedAmountPaid = /\b(?:se realizaron los cargos|total pagado|amount paid)\b/;
 const receiptSubject = /\b(?:comprobante de (?:compra|pago|transferencia)|confirmacion de pago|pago (?:recibido|exitoso|aprobado|procesado|confirmado)|transaccion (?:aprobada|exitosa)|recibo de (?:pago|pedido|compra)|recibo de tu pedido|payment receipt|devolvio el dinero)\b/;
 const receiptEvidence = /\b(?:we(?:'ve)? received (?:your )?payment|pago exitoso|estado\s*:\s*(?:exitoso|aprobado|pagado)|monto desembolsado)\b/;
+const mailingListDelivery = /\b(?:recibiste|recibes) este (?:mail|correo(?: electronico)?|mensaje) porque\b/;
 const cardLabel = /(?:tarjeta(?:[ \t]+(?:de[ \t]+)?(?:d[eé]bito|cr[eé]dito))?|t[ \t]*\.[ \t]*(?:d[eé]b(?:ito)?|cr[eé]d(?:ito)?))\b/.source;
 const cardNumberPrefix = /[ \t]*\.?[ \t]*(?:(?:terminad[ao][ \t]+en|n[uú]mero|nro\.?|no\.?|de|es)[ \t]+)?[:# \t-]*/.source;
 const cardMask = /[*x×•●](?:[ .\t-]{0,3}[*x×•●]){0,18}[ .\t-]{0,3}/.source;
@@ -123,6 +124,7 @@ function rejectedGmailNotice(subject: string, head: string, completion: string, 
   const unpaidReminder = paymentReminder.test(subject) && /\bpast due balance\b/.test(head) &&
     !confirmedAmountPaid.test(completion) && !expenseEvidence.test(completion) && !receiptEvidence.test(completion);
   return excludedSubject.test(subject) || unpaidInvoice || unprocessedPayment || unpaidReminder || excluded.test(head) || blocksGmailCompletion(head) ||
+    mailingListDelivery.test(completion) ||
     qaSubject.test(subject) || (noChargeTrial.test(head) && !confirmedAmountPaid.test(head));
 }
 
@@ -500,7 +502,7 @@ const transferRecipient = new RegExp('\\b(?:pagaste|transferiste)\\s+(?:' + expl
   ')(?:\\s+(?:con|por|mediante)\\s+(?:el\\s+)?bot[oó]n\\s+bancolombia)?' +
   '\\s+a\\s+([^\\n]{1,160}?)(?=\\s+(?:desde (?:tu |el |la )?(?:cuenta|producto)|con (?:el )?bot[oó]n|el\\s+' + dateText + '\\b))', 'giu');
 
-const billMerchant = /\b(?:hiciste un pago|listo tu pago|tu pago)\s+en\s+([^\n]{1,160}?)(?=\s+(?:por\s+[$€\d]|con\s+nequi|fue\s+exitoso)|\s*$)/gim;
+const billMerchant = /\b(?:hiciste un pago|listo tu pago|tu pago)\s+en\s+([^\n]{1,160}?)(?=\s+(?:por\s+[$€\d]|con\s+nequi|fue\s+exitoso|pagaste\b)|\s*$)/gim;
 const fieldMerchant = /(?:^|\n)[ \t]*(?:empresa|comercio)(?:[ \t]*[:=][ \t]*|[ \t]{2,}|\t+|\r?\n[ \t]*)([^\n]{1,160})/gi;
 const storeProduct = new RegExp(/(?:^|\n)[ \t]*([\p{L}\d][^\n\t]{1,150}?)(?:\t+| {2,})(?=[$€]|(?:COP|USD|EUR)\b)/u.source, 'giu');
 const labelledProduct = /(?:^|\n)[ \t]*producto[ \t]*:[ \t]*([^\n\t]{1,150})/giu;

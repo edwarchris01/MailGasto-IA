@@ -18,3 +18,5 @@ li button { margin-left: .5rem; }
 #status { min-height: 1.5em; }
 #notice-detail:empty { display: none; }
 #notice-detail { border-left: 3px solid #246b57; padding-left: .75rem; margin-top: 1rem; }
+.google-signin { display: flex; align-items: center; justify-content: center; gap: .75rem; width: 100%; background: white; color: #1f1f1f; border-color: #747775; min-height: 44px; }
+.access-alternative { color: #50645c; font-size: .9rem; text-align: center; }

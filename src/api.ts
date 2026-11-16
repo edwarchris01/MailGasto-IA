@@ -115,13 +115,31 @@ export class Api {
     return { url: await this.google.authorize(challenge) };
   }
 
+  @Post('auth/google/authorize')
+  @HttpCode(200)
+  async googleWebAuthorize(@Req() req: Request, @Body() body: unknown) {
+    const { challenge } = input(z.object({ challenge: tokenInput.shape.token }), body);
+    await this.accounts.throttle('google-auth:' + req.ip, 40, 600);
+    return { url: await this.google.authorize(challenge, 'web') };
+  }
+
   @Get('mobile/auth/google/callback')
   async googleCallback(@Query() query: unknown, @Res() res: Response) {
+    const parsed = googleCallbackInput.safeParse(query);
+    if (parsed.success && await this.google.returnPlatform(parsed.data.state) === 'web') {
+      let fragment = 'google=failed';
+      try {
+        const receipt = await this.google.receive(parsed.data.state, parsed.data.code);
+        fragment = receipt ? 'google=complete&receipt=' + receipt : 'google=cancelled';
+      } catch { /* Provider details must not be exposed in the redirect. */ }
+      return res.set({ 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' })
+        .location(this.config.origin + '/#' + fragment).status(303).end();
+    }
     return this.returnFromGoogle(query, res, '/mobile/auth/google/return',
       (state, code) => this.google.receive(state, code));
   }
 
-  @Post('mobile/auth/google/complete')
+  @Post(['mobile/auth/google/complete', 'auth/google/complete'])
   @HttpCode(200)
   async googleComplete(@Req() req: Request, @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
     await this.accounts.throttle('google-complete:' + req.ip, 40, 600);

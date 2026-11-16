@@ -36,6 +36,7 @@ export class Worker implements OnApplicationBootstrap, OnApplicationShutdown {
 
   onApplicationBootstrap() {
     this.schedule('Gmail synchronization', 1000, () => this.gmail.pollOne());
+    this.schedule('Gmail automatic reconciliation', 60_000, () => this.gmail.reconcileOne());
     this.schedule('Gmail monthly reprocessing', 2000, () => this.gmail.scanReprocessPage());
     this.schedule('Gmail delivery', 250, () => this.gmail.dispatchOne());
     this.schedule('Previous notice queue', 1000, () => this.processOne());
@@ -103,7 +104,7 @@ export class Worker implements OnApplicationBootstrap, OnApplicationShutdown {
   private async pruneDeliveries() {
     await this.db.query('DELETE FROM mobile_gmail_oauth WHERE expires_at<=now()');
     const deleted = await this.db.query('DELETE FROM gmail_deliveries WHERE id IN (' +
-      "SELECT id FROM gmail_deliveries WHERE completed_at<now()-interval '7 days' ORDER BY completed_at LIMIT 1000)");
+      "SELECT id FROM gmail_deliveries WHERE completed_at<now()-interval '45 days' ORDER BY completed_at LIMIT 1000)");
     return !!deleted.rowCount;
   }
 

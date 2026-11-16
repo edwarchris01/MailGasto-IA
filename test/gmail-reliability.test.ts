@@ -1,0 +1,223 @@
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { test } from 'node:test';
+import { Pool } from 'pg';
+import { DateTime } from 'luxon';
+import { encrypt, readConfig } from '../src/config.js';
+import { Database } from '../src/db.js';
+import { Gmail, gmailClassifierVersion } from '../src/gmail.js';
+import { GmailExtraction } from '../src/gmail-extraction.js';
+import { GmailResults } from '../src/gmail-results.js';
+
+const connection = process.env.MAILGASTO_TEST_DATABASE_URL;
+
+test('Gmail reconciles a bounded month, exposes failures and recovers without repeating completed work', { skip: !connection }, async t => {
+  const base = new URL(connection!);
+  assert(['localhost', '127.0.0.1'].includes(base.hostname), 'Reliability tests require a local database');
+  assert.match(base.pathname, /^\/mailgasto(?:_test)?$/);
+  const schema = 'gmail_reliability_' + randomUUID().replaceAll('-', '');
+  const admin = new Pool({ connectionString: base.href });
+  await admin.query('CREATE SCHEMA ' + schema);
+  base.searchParams.set('options', '-c search_path=' + schema);
+  const config = readConfig({
+    PUBLIC_URL: 'http://localhost:3105', DATABASE_URL: base.href, ENCRYPTION_KEY: 'ab'.repeat(32),
+    N8N_AGENT_KEY: 'local-reliability-agent-key-only-12345', N8N_INGEST_KEY: 'local-reliability-ingest-key-only-1234',
+    N8N_GMAIL_WEBHOOK_URL: 'http://127.0.0.1:5679/webhook/reliability',
+    GOOGLE_CLIENT_ID: 'synthetic-client', GOOGLE_CLIENT_SECRET: 'synthetic-secret',
+    SMTP_URL: 'smtp://localhost:1026', SMTP_FROM: 'Reliability <fixture@example.test>',
+  });
+  const db = new Database(config);
+  t.after(async () => {
+    await db.onApplicationShutdown();
+    assert.match(schema, /^gmail_reliability_[a-f0-9]{32}$/);
+    await admin.query('DROP SCHEMA ' + schema + ' CASCADE');
+    await admin.end();
+  });
+  await db.migrate();
+  const results = new GmailResults(db, config);
+  const gmail = new Gmail(db, config, new GmailExtraction(config), results);
+  const { rows: [owner] } = await db.query<{ id: string }>(
+    "INSERT INTO accounts (email,name,verified_at) VALUES ('reliability@example.test','Fixture',now()) RETURNING id",
+  );
+  const { rows: [mailbox] } = await db.query<{ id: string; generation: string }>(
+    "INSERT INTO mailboxes (account_id,email,source,state,secret,linked_at) VALUES ($1,'fixture@example.test','oauth','active',$2,now()) " +
+    'RETURNING id,generation', [owner.id, encrypt('synthetic-refresh-token', config.encryptionKey)],
+  );
+  const now = DateTime.now().setZone('America/Bogota');
+  const received = now.minus({ seconds: 30 });
+  // This mail precedes the mailbox link; only the bounded reconciliation may read it.
+  const raw = Buffer.from('From: Store <receipts@fixture.example>\r\nSubject: Payment receipt\r\n' +
+    'Authentication-Results: mx.google.com; dmarc=pass header.from=fixture.example\r\n' +
+    'MIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n' +
+    'Your payment was completed on ' + received.toISODate() + '. Amount paid: USD 49.95. Product: web hosting.').toString('base64url');
+  let ids = ['missing-receipt'];
+  let webhookStatus = 202;
+  const posted: Record<string, unknown>[] = [];
+  const rawById = new Map<string, string>();
+  const readIds: string[] = [];
+  t.mock.method(globalThis, 'fetch', async (url: string | URL | Request, options?: RequestInit) => {
+    const address = String(url);
+    if (address === 'https://oauth2.googleapis.com/token') return Response.json({ access_token: 'synthetic-access', expires_in: 3600 });
+    if (address.startsWith('https://gmail.googleapis.com/gmail/v1/users/me/messages?')) {
+      const query = new URL(address).searchParams.get('q')!;
+      assert.match(query, new RegExp('after:' + (Math.floor(now.startOf('month').toMillis() / 1000) - 1)));
+      return Response.json({ messages: ids.map(id => ({ id })) });
+    }
+    if (address.startsWith('https://gmail.googleapis.com/gmail/v1/users/me/messages/')) {
+      const id = new URL(address).pathname.split('/').at(-1)!;
+      readIds.push(id);
+      return Response.json({ id, raw: rawById.get(id) ?? raw, internalDate: String(received.toMillis()), labelIds: ['INBOX'] });
+    }
+    if (address === config.N8N_GMAIL_WEBHOOK_URL) {
+      posted.push(JSON.parse(options!.body as string));
+      return new Response('', { status: webhookStatus });
+    }
+    throw Error('Unexpected external request: ' + address);
+  });
+  const row = async (id: string) => (await db.query('SELECT * FROM gmail_deliveries WHERE message_id=$1', [id])).rows[0];
+  const makeDue = async () => db.query("UPDATE mailboxes SET reconciliation_due_at=now()-interval '1 second' WHERE id=$1", [mailbox.id]);
+  const finishScan = async () => { await gmail.scanReprocessPage(); };
+
+  await t.test('initial reconciliation invokes n8n for incomplete rules and honors the callback', async () => {
+    assert.equal(await gmail.reconcileOne(), true);
+    assert.equal(await gmail.reconcileOne(), false, 'Only one active scan per mailbox');
+    await gmail.scanReprocessPage();
+    await gmail.dispatchOne();
+    assert.equal(posted.length, 1, 'Monthly reprocessing must use n8n when local rules cannot register');
+    const identity = posted[0];
+    assert.equal(identity.messageId, 'missing-receipt');
+    await results.save({ source: 'oauth', deliveryId: identity.deliveryId as string, attemptId: identity.attemptId as string,
+      messageId: identity.messageId as string, receivedAt: identity.receivedAt as string, provider: 'other', forwarded: false,
+      status: 'pending', reason: 'missing_or_ambiguous_fields', confidence: 0 });
+    assert.equal((await row('missing-receipt')).outcome, 'pending');
+    await finishScan();
+  });
+
+  await t.test('daily scan preserves confirmed/discarded/ignored and does not repeat same-version pending', async () => {
+    for (const status of ['registered', 'discarded']) await db.query(
+      'INSERT INTO notices (mailbox_id,message_id,received_at,provider,forwarded,status) VALUES ($1,$2,$3,\'other\',false,$4)',
+      [mailbox.id, 'preserve-' + status, received.toJSDate(), status],
+    );
+    await db.query('INSERT INTO gmail_deliveries (mailbox_id,generation,message_id,completed_at,outcome,classifier_version) ' +
+      "VALUES ($1,$2,'already-ignored',now(),'ignored',$3)", [mailbox.id, mailbox.generation, gmailClassifierVersion]);
+    ids = ['missing-receipt', 'preserve-registered', 'preserve-discarded', 'already-ignored'];
+    await makeDue();
+    await gmail.reconcileOne();
+    await gmail.scanReprocessPage();
+    assert.equal(await gmail.dispatchOne(), false);
+    assert.equal(posted.length, 1);
+    await finishScan();
+    const latestRun = (await gmail.list(owner.id))[0].reprocess as { summary: Record<string, number> };
+    assert.deepEqual(latestRun.summary, {}, 'Daily scans report new work, not the already processed mailbox');
+    assert.equal((await row('missing-receipt')).outcome, 'pending');
+    assert.equal((await db.query('SELECT count(*)::int AS total FROM transactions')).rows[0].total, 0);
+  });
+
+  await t.test('a rules revision rechecks pending once while preserving ignored messages', async () => {
+    await db.query("UPDATE gmail_deliveries SET classifier_version='previous-rules' WHERE message_id='missing-receipt'");
+    await db.query("UPDATE mailboxes SET reconciliation_version='previous-rules' WHERE id=$1", [mailbox.id]);
+    assert.equal(await gmail.reconcileOne(), true, 'A new classifier version need not wait one day');
+    await gmail.scanReprocessPage();
+    await gmail.dispatchOne();
+    assert.equal(posted.length, 2);
+    const identity = posted.at(-1)!;
+    await results.save({ source: 'oauth', deliveryId: identity.deliveryId as string, attemptId: identity.attemptId as string,
+      messageId: identity.messageId as string, receivedAt: identity.receivedAt as string, status: 'ignored' });
+    await finishScan();
+  });
+
+  await t.test('temporary failures remain visible and have bounded automatic recovery', async () => {
+    ids = ['temporary-failure'];
+    webhookStatus = 503;
+    await makeDue();
+    await gmail.reconcileOne();
+    await gmail.scanReprocessPage();
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await db.query("UPDATE gmail_deliveries SET due_at=now() WHERE message_id='temporary-failure'");
+      await gmail.dispatchOne();
+    }
+    let failed = await row('temporary-failure');
+    assert.equal(failed.outcome, 'error');
+    assert.equal(failed.last_error, 'webhook_unavailable');
+    assert(failed.completed_at);
+    assert(failed.due_at > new Date(), 'Recovery waits at least six hours');
+    const mailboxes = await gmail.list(owner.id);
+    assert.deepEqual(mailboxes[0].delivery, { queued: 0, retrying: 0, failed: 1, lastError: 'webhook_unavailable' });
+    await finishScan();
+    for (let cycle = 1; cycle <= 2; cycle++) {
+      await makeDue();
+      await db.query("UPDATE gmail_deliveries SET due_at=now()-interval '1 second' WHERE message_id='temporary-failure'");
+      await gmail.reconcileOne();
+      await gmail.scanReprocessPage();
+      failed = await row('temporary-failure');
+      assert.equal(failed.completed_at, null);
+      assert.equal(failed.recovery_count, cycle);
+      await db.query("UPDATE gmail_deliveries SET attempts=5,due_at=now() WHERE message_id='temporary-failure'");
+      await gmail.dispatchOne();
+      await finishScan();
+    }
+    await makeDue();
+    await db.query("UPDATE gmail_deliveries SET due_at=now()-interval '1 second' WHERE message_id='temporary-failure'");
+    await gmail.reconcileOne();
+    await gmail.scanReprocessPage();
+    assert.equal(await gmail.dispatchOne(), false, 'Automatic recovery stops after two additional cycles');
+    assert.equal((await row('temporary-failure')).outcome, 'error');
+    await finishScan();
+  });
+
+  await t.test('explicit retry can recover a terminal delivery without duplicating a movement', async () => {
+    webhookStatus = 202;
+    await gmail.reprocessMonth(owner.id, mailbox.id);
+    await gmail.scanReprocessPage();
+    await gmail.dispatchOne();
+    const identity = posted.at(-1)!;
+    const result = { source: 'oauth' as const, deliveryId: identity.deliveryId as string, attemptId: identity.attemptId as string,
+      messageId: identity.messageId as string, receivedAt: identity.receivedAt as string, status: 'ignored' as const };
+    await results.save(result);
+    assert.deepEqual(await results.save(result), { outcome: 'duplicate' });
+    const recovered = await row('temporary-failure');
+    assert.equal(recovered.outcome, 'ignored');
+    assert.equal(recovered.last_error, null);
+    assert.equal(((await gmail.list(owner.id))[0].delivery as { failed: number }).failed, 0);
+    await finishScan();
+  });
+
+  await t.test('registered bank metadata is reviewed once per version without changing user values', async () => {
+    const sender = 'alertasynotificaciones@an.notificacionesbancolombia.com';
+    const text = 'Bancolombia: Compraste $12.500 en TIENDA DEMO con tu T.Deb *1234, el ' + received.toFormat('dd/MM/yyyy') + ' a las 14:42.';
+    const bankRaw = Buffer.from('From: <' + sender + '>\r\nSubject: Alertas y Notificaciones\r\n' +
+      'Authentication-Results: mx.google.com; dmarc=pass header.from=notificacionesbancolombia.com\r\n' +
+      'MIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n' + text).toString('base64url');
+    for (const [id, reason] of [['registered-details', null], ['user-confirmed', 'user_confirmed']] as const) {
+      const { rows: [notice] } = await db.query<{ id: string }>(
+        "INSERT INTO notices (mailbox_id,message_id,received_at,provider,forwarded,status,reason) VALUES ($1,$2,$3,'other',false,'registered',$4) RETURNING id",
+        [mailbox.id, id, received.toJSDate(), reason],
+      );
+      await db.query('INSERT INTO transactions (notice_id,amount_minor,currency,transaction_date,description,category,direction) ' +
+        "VALUES ($1,1250000,'COP',$2,'Descripción conservada del usuario','otros','expense')", [notice.id, received.toISODate()]);
+      rawById.set(id, bankRaw);
+    }
+    ids = ['registered-details', 'user-confirmed'];
+    await makeDue();
+    await gmail.reconcileOne();
+    await gmail.scanReprocessPage();
+    assert.equal(await gmail.dispatchOne(), true);
+    assert.equal(await gmail.dispatchOne(), false);
+    const { rows: [enriched] } = await db.query(
+      'SELECT n.provider,n.reported_institution,n.transaction_time,n.card_last4,t.amount_minor::text,t.description,t.category ' +
+      "FROM notices n JOIN transactions t ON t.notice_id=n.id WHERE n.message_id='registered-details'",
+    );
+    assert.deepEqual(enriched, { provider: 'bancolombia', reported_institution: 'bancolombia', transaction_time: '14:42',
+      card_last4: '1234', amount_minor: '1250000', description: 'Descripción conservada del usuario', category: 'otros' });
+    assert.equal(readIds.filter(id => id === 'user-confirmed').length, 0);
+    assert.equal(readIds.filter(id => id === 'registered-details').length, 1);
+    await finishScan();
+    // A bank receipt can legitimately lack a time. Do not reread it every day for the same rules version.
+    await db.query("UPDATE notices SET transaction_time=NULL WHERE message_id='registered-details'");
+    await makeDue();
+    await gmail.reconcileOne();
+    await gmail.scanReprocessPage();
+    assert.equal(await gmail.dispatchOne(), false);
+    assert.equal(readIds.filter(id => id === 'registered-details').length, 1);
+  });
+});

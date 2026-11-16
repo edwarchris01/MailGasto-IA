@@ -417,14 +417,23 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       assert.equal(await gmail.scanReprocessPage(), true);
       const pendingScan = (await (await request('mailboxes', 'GET', undefined, other)).json())[0].reprocess;
       assert.equal(pendingScan.scanning, true);
-      assert.equal(pendingScan.queued, 2);
+      assert.equal(pendingScan.queued, 3);
+      const firstPageWebhooksBefore = deliveries.length;
       assert.equal(await gmail.dispatchOne(), true);
       assert.equal(await gmail.dispatchOne(), true);
+      assert.equal(await gmail.dispatchOne(), true);
+      assert.equal(deliveries.length, firstPageWebhooksBefore + 1);
+      const existingCallback = filterAndResolve(oauthInput(deliveries.at(-1)!));
+      assert.equal(existingCallback.messageId, 'direct');
+      assert.equal((await (await post(existingCallback)).json()).outcome, 'duplicate');
       assert.equal(await gmail.scanReprocessPage(), true);
       const webhooksBefore = deliveries.length;
       for (let index = 0; index < 5; index++) assert.equal(await gmail.dispatchOne(), true);
       assert.equal(await gmail.dispatchOne(), false);
-      assert.equal(deliveries.length, webhooksBefore);
+      assert.equal(deliveries.length, webhooksBefore + 1);
+      const historicalCallback = filterAndResolve(oauthInput(deliveries.at(-1)!), uncertainModel);
+      assert.equal(historicalCallback.messageId, 'past-uncertain');
+      assert.equal((await (await post(historicalCallback)).json()).outcome, 'stored');
       assert.equal(await gmail.scanReprocessPage(), false);
       assert.deepEqual(scanPages, [null, 'second']);
       const { reprocess } = (await (await request('mailboxes', 'GET', undefined, other)).json())[0];
@@ -460,8 +469,14 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       assert.notDeepEqual(await second.json(), activeRun);
       assert.equal(await gmail.scanReprocessPage(), true);
       assert.equal(await gmail.scanReprocessPage(), true);
-      for (let index = 0; index < 5; index++) assert.equal(await gmail.dispatchOne(), true);
+      const repeatedWebhooksBefore = deliveries.length;
+      for (let index = 0; index < 6; index++) assert.equal(await gmail.dispatchOne(), true);
       assert.equal(await gmail.dispatchOne(), false);
+      assert.equal(deliveries.length, repeatedWebhooksBefore + 2);
+      for (const delivery of deliveries.slice(repeatedWebhooksBefore)) {
+        const repeated = filterAndResolve(oauthInput(delivery), delivery.messageId === 'direct' ? goodModel : uncertainModel);
+        assert.equal((await (await post(repeated)).json()).outcome, delivery.messageId === 'direct' ? 'duplicate' : 'stored');
+      }
       assert.equal(await gmail.scanReprocessPage(), false);
       const enriched = await db.query(
         'SELECT t.id,t.payment_method,n.transaction_time,t.amount_minor::text FROM transactions t JOIN notices n ON n.id=t.notice_id WHERE n.id=$1',
