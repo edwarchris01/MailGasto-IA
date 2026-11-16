@@ -50,6 +50,8 @@ class SmsCandidateFilterTest {
             "Nequi" to "Reembolso pendiente por COP 80.000.",
             "Nequi" to "No reversamos 300,00 de tu compra en COMERCIO SINTETICO.",
             "Nequi" to "Nunca reversamos 300,00 de tu compra en COMERCIO SINTETICO.",
+            "Nequi" to "No te reversamos 300,00 de tu compra en COMERCIO SINTETICO.",
+            "Nequi" to "Nunca te reversamos 300,00 de tu compra en COMERCIO SINTETICO.",
             "Nequi" to "Reversaremos 300,00 de tu compra en COMERCIO SINTETICO.",
             "Nequi" to "Si reversamos 300,00 de tu compra, te avisaremos.",
             "Nequi" to "Reversamos 300,00 de tu compra. Estado: pendiente.",
