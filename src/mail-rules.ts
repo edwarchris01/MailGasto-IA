@@ -9,6 +9,7 @@ export type Provider = typeof providers[number];
 export type NoticeText = { provider: Provider; forwarded: boolean; text: string };
 export type GmailNotice = Omit<NoticeText, 'text'> & {
   subject: string; body: string; payment?: GmailPayment; format?: GmailFormat; unauthenticated?: boolean; references?: string[];
+  authenticated?: boolean;
 };
 export type SenderMap = Readonly<Record<string, typeof bankProviders[number]>>;
 export const gmailBankSenders: SenderMap = {
@@ -57,8 +58,10 @@ const googlePlayFallbackSubject = /^se uso una forma de pago alternativa\b[^\n]{
 const googlePlayFallbackReceipt = /\bse realizo un (?:cargo|cobro) en (?:tu )?(?:visa|mastercard|amex|tarjeta)\b/;
 const googlePlayCardField = /(?:^|\n)[ \t]*forma de pago[ \t]*:[ \t]*(?:\n[ \t]*)?(visa|mastercard|amex)[ \t]*[-‐‑–][ \t]*(\d{4})(?!\d)/g;
 const cancelledPurchase = /\b(?:pago|compra|transaccion) (?:(?:fue|esta|ha sido|quedo) )?cancelad[oa]\b/g;
-const processingError = /\b(?:transacci(?:o|\?|�)n (?:con |resulto en (?:un )?)error|se produjo un error en el pago|no pudimos (?:procesar|realizar|completar) (?:tu |su |el )?(?:pago|cobro)|no hemos recibido (?:tu|su) pago)\b|(?:^|\n)[ \t]*estado(?:[ \t]*:[ \t]*|[ \t]{2,}|\t+)[ \t]*(?:error|declined|failed|rejected)\b/i;
+const processingError = /\b(?:transacci(?:o|\?|�)n (?:con |resulto en (?:un )?)error|se produjo un error en el pago|no pudimos (?:procesar|realizar|completar) (?:tu |su |el )?(?:pago|cobro)|no hemos recibido (?:tu|su) pago)\b|(?:^|\n)[ \t]*estado(?:[ \t]*:[ \t]*|[ \t]{2,}|\t+)[ \t]*(?:error|rechazad[oa]|cancelad[oa]|pendiente|en proceso|programad[oa]|declined|failed|rejected|cancelled|canceled|pending|scheduled)\b/i;
 const unsuccessfulPayment = /\bno se pudo hacer (?:tu|su|el) pago\b/;
+const blockedOperationState = /\b(?:estado|status)[ \t]*:[ \t]*(?:rechazad[oa]|cancelad[oa]|pendiente|en proceso|programad[oa]|declined|failed|rejected|cancelled|canceled|pending|scheduled)\b/i;
+const unpaidAccountNotice = /\b(?:past due balance|account suspended for nonpayment|account suspension warning|still unpaid|please complete payment|issue while attempting to (?:automatically )?charge)\b/;
 const qaSubject = /\b(?:aviso qa|mailgasto.{0,12}\bqa|(?:aviso|pago|transaccion|compra|comprobante|confirmacion) de prueba|sandbox)\b/;
 const expenseEvidence = /\b(?:pagaste|compraste|enviaste|transferiste|retiraste|(?:recibimos|hemos recibido) (?:tu|su) pago|(?:realizaste|hiciste) un (?:pago|retiro)|te (?:debitaron|cobraron|descontaron)|se (?:te )?(?:debito|cobro)|se realizaron los cargos|se proceso su pago|compra (?:fue )?(?:confirmada|aprobada|realizada|exitosa|procesada|completada)|(?:tu|su) pago (?:(?:fue|ha sido) )?(?:confirmado|aprobado|realizado|exitoso|procesado|completado|aplicado)|el pago de tu pedido\b[^.!?\n]{0,120}\bfue confirmado|el pago de tu pedido\b[^.!?\n]{0,120}\bha sido confirmado)\b/;
 const incomeEvidence = /\b(?:recibiste\s+(?=un(?:a)? (?:pago|transferencia|consignacion|devolucion)\b|(?:plata|dinero|tu dinero|cop|usd|eur)\b|[$€\d])|(?:te (?:enviaron|transfirieron|abonaron|acreditaron|consignaron|reembolsaron)|se (?:te )?(?:abono|acredito|consigno)|(?:transferencia|consignacion|deposito|abono|reembolso|desembolso) (?:fue )?(?:recibid[oa]|acreditad[oa]|abonad[oa])|pago recibido en tu cuenta)\b)/;
@@ -75,6 +78,7 @@ const confirmedAmountPaid = /\b(?:se realizaron los cargos|total pagado|amount p
 const receiptSubject = /\b(?:comprobante de (?:compra|pago|transferencia)|confirmacion de pago|pago (?:recibido|exitoso|aprobado|procesado|confirmado)|transaccion (?:aprobada|exitosa)|recibo de (?:pago|pedido|compra)|recibo de tu pedido|payment receipt|devolvio el dinero)\b/;
 const receiptEvidence = /\b(?:we(?:'ve)? received (?:your )?payment|pago exitoso|estado\s*:\s*(?:exitoso|aprobado|pagado)|monto desembolsado)\b/;
 const mailingListDelivery = /\b(?:recibiste|recibes) este (?:mail|correo(?: electronico)?|mensaje) porque\b/;
+const sentAmountEvidence = /\bimporte enviado\b/;
 const cardLabel = /(?:tarjeta(?:[ \t]+(?:de[ \t]+)?(?:d[eé]bito|cr[eé]dito))?|t[ \t]*\.[ \t]*(?:d[eé]b(?:ito)?|cr[eé]d(?:ito)?))\b/.source;
 const cardNumberPrefix = /[ \t]*\.?[ \t]*(?:(?:terminad[ao][ \t]+en|n[uú]mero|nro\.?|no\.?|de|es)[ \t]+)?[:# \t-]*/.source;
 const cardMask = /[*x×•●](?:[ .\t-]{0,3}[*x×•●]){0,18}[ .\t-]{0,3}/.source;
@@ -124,13 +128,14 @@ function rejectedGmailNotice(subject: string, head: string, completion: string, 
   const unpaidReminder = paymentReminder.test(subject) && /\bpast due balance\b/.test(head) &&
     !confirmedAmountPaid.test(completion) && !expenseEvidence.test(completion) && !receiptEvidence.test(completion);
   return excludedSubject.test(subject) || unpaidInvoice || unprocessedPayment || unpaidReminder || excluded.test(head) || blocksGmailCompletion(head) ||
-    mailingListDelivery.test(completion) ||
+    mailingListDelivery.test(completion) || unpaidAccountNotice.test(subject + '\n' + completion) ||
     qaSubject.test(subject) || (noChargeTrial.test(head) && !confirmedAmountPaid.test(head));
 }
 
 function blocksGmailCompletion(text: string) {
-  const status = completedRefund.test(text) && !futureRefund.test(text) ? text.replace(cancelledPurchase, '') : text;
-  return notCompleted.test(status) || gmailRejected.test(status) || processingError.test(status) || unsuccessfulPayment.test(status);
+  const status = (completedRefund.test(text) || creditedRefund.test(text)) && !futureRefund.test(text) ? text.replace(cancelledPurchase, '') : text;
+  return notCompleted.test(status) || gmailRejected.test(status) || processingError.test(status) || unsuccessfulPayment.test(status) ||
+    blockedOperationState.test(status);
 }
 
 function gmailPrimaryText(body: string) {
@@ -138,11 +143,11 @@ function gmailPrimaryText(body: string) {
 }
 
 function gmailHasExpense(text: string) {
-  return expenseEvidence.test(text) || englishExpense.test(text);
+  return expenseEvidence.test(text) || englishExpense.test(text) || sentAmountEvidence.test(text);
 }
 
 function gmailHasIncome(text: string) {
-  return incomeEvidence.test(text) || englishIncome.test(text);
+  return incomeEvidence.test(text) || englishIncome.test(text) || completedRefund.test(text) || creditedRefund.test(text);
 }
 
 export function isGmailExplicitNonMovement(subject: string, body: string) {
@@ -151,6 +156,7 @@ export function isGmailExplicitNonMovement(subject: string, body: string) {
   const head = subjectText + '\n' + bodyText.slice(0, 600);
   const invoice = electronicInvoice.test(subjectText) || /\bfactura electronica de venta\b/.test(head);
   if (/^\s*\[mailgasto ia\]|\b(?:aviso|pago|transaccion|compra|comprobante|confirmacion) de prueba\b/.test(subjectText)) return true;
+  if (blocksGmailCompletion(subjectText + '\n' + bodyText)) return true;
   if ((gmailHasExpense(bodyText) || gmailHasIncome(bodyText)) && !qaSubject.test(subjectText)) return false;
   return rejectedGmailNotice(subjectText, head, bodyText, invoice) || englishRequest.test(head) ||
     (futureRefund.test(head) && !completedRefund.test(head));
@@ -215,11 +221,13 @@ export function candidate(from: string, subject: string, body: string, senders: 
   if (!transactionWords.test(meaningful) && !receiptSubject.test(meaningful) && !monetaryNotice) return null;
   if (/\b(?:aviso|pago|transaccion|compra|comprobante|confirmacion) de prueba\b/.test(subjectText)) return null;
   const hasOperation = gmailHasExpense(core) || gmailHasIncome(core) || Boolean(receiptDirection(format, subjectText, core));
+  if (isGmailExplicitNonMovement(subject, body)) return null;
   const invoice = invoiceTitle || /\bfactura electronica de venta\b/.test(head);
   if (!hasOperation && (rejectedGmailNotice(subjectText, head, core, invoice) || informationalOnly.test(head) || englishRequest.test(head) ||
     futureRefund.test(head) && !completedRefund.test(head))) return null;
   // Forwarded headers and the apparent From do not authenticate an original.
   return { provider: authenticated === false ? 'other' : provider ?? 'other', forwarded, subject, body, payment,
+    ...(authenticated === true && !unauthenticated ? { authenticated: true } : {}),
     ...(format && !unauthenticated ? { format } : {}), ...(unauthenticated ? { unauthenticated } : {}),
     ...(references.length ? { references } : {}) };
 }
@@ -380,12 +388,19 @@ function expandBancolombiaDate(body: string, received: string) {
 }
 
 export function gmailReceivedDay(receivedAt: string) {
+  return gmailReceivedDateTime(receivedAt)?.date;
+}
+
+export function gmailReceivedDateTime(receivedAt: string) {
   const instant = Date.parse(receivedAt);
   if (!Number.isFinite(instant)) return undefined;
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
   }).formatToParts(instant);
-  return ['year', 'month', 'day'].map(type => parts.find(part => part.type === type)?.value ?? '').join('-');
+  const value = (type: string) => parts.find(part => part.type === type)?.value ?? '';
+  return { date: ['year', 'month', 'day'].map(value).join('-'),
+    transactionTime: ['hour', 'minute', 'second'].map(value).join(':') };
 }
 
 function singleValue<T>(values: Iterable<T>) {
@@ -807,7 +822,8 @@ export function inspectGmailNotice(notice: Pick<GmailNotice, 'subject' | 'body' 
   const completionText = gmailPrimaryText(notice.body);
   const text = normalize(notice.subject) + '\n' + completionText;
   const formatDirection = receiptDirection(notice.format, normalize(notice.subject), completionText);
-  const expense = gmailHasExpense(completionText) || formatDirection === 'expense';
+  const creditedReturn = completedRefund.test(completionText) || creditedRefund.test(completionText);
+  const expense = !creditedReturn && (gmailHasExpense(completionText) || formatDirection === 'expense');
   const income = gmailHasIncome(completionText) || formatDirection === 'income';
   const direction = movementDirection(expense, income);
   const loan = direction === 'income' && loanPaidOut.test(completionText);
@@ -837,11 +853,13 @@ export function inspectGmailNotice(notice: Pick<GmailNotice, 'subject' | 'body' 
   const date = singleValue(relevantDates.map(match => match.date));
   const playDate = notice.format === 'google_play' && formatDirection
     ? googlePlayOperationDate(text, relevantDates, normalize(notice.subject).length) : null;
+  const reportedDate = playDate ? playDate.date : date;
   const reportedInstitution = extractReportedInstitution(text);
   const details = notice.payment ?? extractGmailPayment(notice.subject, notice.body, notice.format);
   const counterparty = direction === 'expense' ? extractPurchaseMerchant(notice.body, notice.format) : null;
   return {
-    text, money: extractGmailMoney(text, notice.format), date: playDate ? playDate.date : date, direction,
+    text, money: extractGmailMoney(text, notice.format), date: reportedDate, direction,
+    ambiguousDate: relevantDates.length > 0 && !reportedDate,
     ...details,
     transactionTime: playDate ? playDate.transactionTime : notice.format === 'github' || notice.format === 'whoosh' && !date ? null :
       extractGmailTime(text, relevantDates.filter(match => match.date === date), date, notice.format),
@@ -852,7 +870,7 @@ export function inspectGmailNotice(notice: Pick<GmailNotice, 'subject' | 'body' 
       (notice.format === 'pse' && unsettledPseConcept.test(completionText) ||
         /^¡?pago exitoso!?$/.test(normalize(notice.subject.trim())) && /\bhiciste un pago en\b/.test(completionText)),
     needsCreditReview,
-    refundPending: futureRefund.test(completionText) && !completedRefund.test(completionText),
+    refundPending: futureRefund.test(completionText) && !completedRefund.test(completionText) && !creditedRefund.test(completionText),
     refundOrReversal: completedRefund.test(completionText) || creditedRefund.test(completionText) || reversedMovement.test(completionText),
     cashFlowWithoutPurpose: (transferMovement.test(completionText) || details.paymentMethod === 'Bre-B') &&
       !payrollConcept.test(completionText) && !counterparty && !/\b(?:compraste|pago factura|pagaste|paid for|purchase of)\b/.test(completionText) &&
@@ -892,7 +910,7 @@ function gmailEvidenceHints(safe: Pick<GmailNotice, 'subject' | 'body'>, checked
   const body = safe.body;
   const evidence: Partial<GmailCitations> = {};
   const clauses = body.split(/\n|(?<=[.!?])\s+(?=\p{Lu})/u).map(line => line.trim());
-  const directionPattern = checked.direction === 'expense' ? [expenseEvidence, englishExpense] :
+  const directionPattern = checked.direction === 'expense' ? [expenseEvidence, englishExpense, sentAmountEvidence] :
     checked.direction === 'income' ? [incomeEvidence, englishIncome] : [];
   for (const clause of clauses) {
     const primary = gmailPrimaryText(clause);
@@ -1141,13 +1159,11 @@ function gmailModelProof(safe: Pick<GmailNotice, 'subject' | 'body'>, model: Non
   };
 }
 
-const nonEconomicModelKinds = new Set(['internal_transfer', 'reversal', 'refund', 'loan_disbursement', 'cash_withdrawal', 'card_bill']);
-
 export function resolveGmailExtraction(notice: GmailNotice, model: ReturnType<typeof readGmailModel>,
-  allowLocalReview = false, checked = inspectGmailNotice(notice)) {
+  allowLocalReview = false, checked = inspectGmailNotice(notice), receivedAt?: string) {
   const safe = gmailModelInput(notice, checked);
   const proof = model && gmailModelProof(safe, model, checked);
-  if (!checked.hasCompletion && (isGmailExplicitNonMovement(notice.subject, notice.body) || checked.refundPending)) {
+  if (isGmailExplicitNonMovement(notice.subject, notice.body) || checked.refundPending) {
     return { status: 'ignored' as const };
   }
   const avalCopy = !notice.unauthenticated && !notice.forwarded && notice.format === 'avalpay' &&
@@ -1162,34 +1178,35 @@ export function resolveGmailExtraction(notice: GmailNotice, model: ReturnType<ty
   const operatedAmount = checked.hasCompletion ? extractGmailMoney(gmailPrimaryText(notice.body), notice.format) : null;
   const playDateVerified = notice.format === 'google_play' && checked.knownReceipt;
   const verifiedReceipt = Boolean(notice.format && checked.knownReceipt || notice.provider !== 'other' && checked.hasCompletion);
-  const literal = Boolean((allowLocalReview || verifiedReceipt) && checked.date && checked.direction && checked.money &&
-    (notice.provider !== 'other' || checked.knownReceipt) && !notice.unauthenticated && !notice.forwarded &&
-    (playDateVerified || findDates(normalize(notice.body)).some(item => item.date === checked.date)) &&
+  const received = !checked.date && !checked.ambiguousDate && receivedAt ? gmailReceivedDateTime(receivedAt) : undefined;
+  const date = checked.date ?? received?.date ?? null;
+  const dateSource = checked.date ? 'reported' as const : received ? 'received_at' as const : undefined;
+  const literal = Boolean((allowLocalReview || verifiedReceipt) && date && checked.direction && checked.money &&
+    (notice.provider !== 'other' || checked.knownReceipt || allowLocalReview && notice.authenticated === true) &&
+    !notice.unauthenticated && !notice.forwarded &&
+    (received || playDateVerified || findDates(normalize(notice.body)).some(item => item.date === checked.date)) &&
     operatedAmount?.currency === checked.money.currency &&
     operatedAmount.amountMinor === checked.money.amountMinor);
-  const { date, paymentMethod, cardType, cardLast4, transactionTime, reportedInstitution } = checked;
-  const details = { cardType, cardLast4, transactionTime, reportedInstitution };
+  const { paymentMethod, cardType, cardLast4, reportedInstitution } = checked;
+  const transactionTime = received?.transactionTime ?? checked.transactionTime;
+  const details = { cardType, cardLast4, transactionTime, reportedInstitution, ...(dateSource ? { dateSource } : {}) };
   const evidence = {
     date, paymentMethod, ...details,
     amountMinor: checked.money?.amountMinor, currency: checked.money?.currency, direction: checked.direction ?? undefined,
   };
-  const references = (checked.date && checked.direction === 'expense' && checked.money || avalCopy) && notice.references?.length
+  const references = (date && checked.direction === 'expense' && checked.money || avalCopy) && notice.references?.length
     ? { references: notice.references } : {};
   if (avalCopy) return {
     status: 'pending' as const, reason: 'missing_or_ambiguous_fields' as const, confidence: 0, evidence, ...references,
     avalCopy: true as const, unconfirmedFields: [...(!checked.date ? ['date' as const] : []),
       ...(!checked.direction ? ['direction' as const] : [])],
   };
-  const kind = inspectGmailMovementContext(notice, checked).kind;
-  const modelKind = model?.movementKind && gmailLiteral(safe, model.evidence.movementKind) ? model.movementKind : null;
-  if (notice.unauthenticated || notice.forwarded || checked.ownTransfer || checked.walletPayout || checked.needsCreditReview ||
-      checked.needsPurposeReview || checked.refundOrReversal || checked.contradictoryStatus ||
-      checked.cashFlowWithoutPurpose && !merchant ||
-      kind && nonEconomicModelKinds.has(kind) || modelKind && nonEconomicModelKinds.has(modelKind)) return {
+  if (notice.unauthenticated || notice.forwarded || checked.contradictoryStatus) return {
     status: 'pending' as const, reason: 'unconfirmed_extraction' as const, confidence: 0, unconfirmedFields: [], evidence, ...references,
   };
   const independentlyVerified = literal && (verifiedReceipt || !model && allowLocalReview);
-  const modelVerified = model?.classification === 'completed' && proof?.completed && proof.amount && proof.currency && proof.date && proof.direction;
+  const modelVerified = model?.classification === 'completed' && proof?.completed && proof.amount && proof.currency &&
+    (proof.date || received) && proof.direction;
   if ((independentlyVerified || modelVerified) && checked.money && date && checked.direction) {
     const citedDescription = model?.description && gmailLiteral(safe, model.evidence.description) &&
       model.evidence.description?.includes(model.description) && (merchant || paidPurpose.test(model.evidence.description))

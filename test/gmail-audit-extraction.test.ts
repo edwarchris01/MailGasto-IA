@@ -21,21 +21,23 @@ test('Nequi receipt keeps the merchant when HTML folds its heading and payment i
       amountMinor: '3500000', currency: 'COP', date: '2026-11-14', paymentMethod: 'Nequi',
       description: 'Claro', direction: 'expense', category: 'otros',
       transactionTime: null, cardType: null, cardLast4: null, reportedInstitution: null,
+      dateSource: 'reported',
     });
     assert.doesNotMatch(notice.body, /3145555555/);
   }
 });
 
-test('Nequi Bre-B transfer retains its exact evidence without inventing income purpose', () => {
+test('Nequi Bre-B receipt registers the real incoming cash flow without requiring a purpose', () => {
   const notice = candidate('notificaciones@nequi.com.co', '¡Recibiste plata por Bre-B!',
     'Recibiste 615.000 de PERSONA PRUEBA el 1 de noviembre de 2026 a las 10:29 p.m, desde el banco Davivienda. ' +
     'Revisa el detalle en los movimientos de tu app o descarga el comprobante si lo necesitas.', gmailBankSenders, true);
   assert.ok(notice);
   const result = resolveGmailExtraction(notice, null, true);
-  assert.equal(result.status, 'pending');
-  assert.deepEqual(result.evidence, {
+  assert.equal(result.status, 'registered');
+  assert.deepEqual(result.movement, {
     amountMinor: '61500000', currency: 'COP', date: '2026-11-01', direction: 'income', paymentMethod: 'Bre-B',
     transactionTime: '22:29', cardType: null, cardLast4: null, reportedInstitution: null,
+    dateSource: 'reported', category: 'ingresos', description: 'Ingreso · Bre-B',
   });
 });
 
@@ -68,7 +70,7 @@ test('marketing delivery footer is not proof that the recipient received money',
   assert.equal(isGmailExplicitNonMovement('Compra realizada', receipt), false);
 });
 
-test('Nequi outgoing Bre-B retains bare amounts and Spanish dates while leaving its economic purpose for review', () => {
+test('Nequi outgoing Bre-B registers bare amounts and Spanish dates without requiring a purpose', () => {
   for (const [amount, clock, expectedTime] of [['80.000', 'a la 1:12 a.m.', '01:12'], ['440.000', 'a las 4:13 a.m.', '04:13']]) {
     const notice = candidate('notificaciones@nequi.com.co', '¡Enviaste plata por Bre-B!',
       `Enviaste de manera exitosa ${amount} a la llave 0090465666 de JUAN PRUEBA el 2 de noviembre de 2026 ${clock} ` +
@@ -76,13 +78,15 @@ test('Nequi outgoing Bre-B retains bare amounts and Spanish dates while leaving 
       gmailBankSenders, true);
     assert.ok(notice);
     const result = resolveGmailExtraction(notice, null, true);
-    assert.equal(result.status, 'pending');
-    assert.equal(result.evidence?.amountMinor, amount.replace('.', '') + '00');
-    assert.equal(result.evidence?.currency, 'COP');
-    assert.equal(result.evidence?.date, '2026-11-02');
-    assert.equal(result.evidence?.transactionTime, expectedTime);
-    assert.equal(result.evidence?.paymentMethod, 'Bre-B');
-    assert.equal(result.evidence?.direction, 'expense');
+    assert.equal(result.status, 'registered');
+    assert.equal(result.movement?.amountMinor, amount.replace('.', '') + '00');
+    assert.equal(result.movement?.currency, 'COP');
+    assert.equal(result.movement?.date, '2026-11-02');
+    assert.equal(result.movement?.dateSource, 'reported');
+    assert.equal(result.movement?.transactionTime, expectedTime);
+    assert.equal(result.movement?.paymentMethod, 'Bre-B');
+    assert.equal(result.movement?.direction, 'expense');
+    assert.equal(result.movement?.category, 'otros');
   }
 });
 

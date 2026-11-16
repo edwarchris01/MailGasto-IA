@@ -34,7 +34,7 @@ test('recognizes notices and identifiable forwards and removes sensitive materia
   assert.equal(gmailForwarded('Fwd: Aviso de compra', sample), true);
 });
 
-test('does not turn a bare transfer into income and distinguishes a payment failure from a conflict', () => {
+test('registers a proven incoming transfer as cash flow and ignores failed payments', () => {
   const from = 'avisos@comercio.example';
   const incoming = candidate(from, 'Transferencia recibida', 'Te abonaron COP 1.200 el 10/11/2026 con Nequi.', senders, true);
   assert.equal(incoming?.provider, 'other');
@@ -46,13 +46,12 @@ test('does not turn a bare transfer into income and distinguishes a payment fail
   });
   assert.ok(model);
   const result = resolveGmailExtraction(incoming!, model);
-  assert.equal(result.status, 'pending');
-  assert.equal(result.evidence?.amountMinor, '120000');
-  assert.equal(result.evidence?.direction, 'income');
+  assert.equal(result.status, 'registered');
+  assert.equal(result.movement?.amountMinor, '120000');
+  assert.equal(result.movement?.direction, 'income');
   assert.equal(resolveGmailExtraction(incoming!, null).status, 'pending');
   assert.equal(candidate(from, 'Solicitud de pago', 'Paga antes de mañana el saldo de COP 1.200.', senders), null);
-  const conflict = candidate(from, 'Pago cancelado', 'La compra aprobada por COP 1.200 fue cancelada.', senders);
-  assert.equal(resolveGmailExtraction(conflict!, null).status, 'pending');
+  assert.equal(candidate(from, 'Pago cancelado', 'La compra aprobada por COP 1.200 fue cancelada.', senders), null);
   assert.equal(candidate(from, 'Pago de ropa', 'Tu pago no pudo ser procesado.', senders), null);
   const incomplete = candidate(from, 'Compra aprobada', 'Compraste un plan.', senders);
   assert.equal(resolveGmailExtraction(incomplete!, model).status, 'pending');
@@ -151,9 +150,12 @@ test('uses rules for authenticated Bancolombia formats and sends only a protecte
       'Producto 123456789012; teléfono 3215555555; https://example.test; titular@example.test',
   };
   assert.equal((await service.classify({ ...payment, from: sender }, false, false)).status, 'pending');
-  assert.equal((await service.classify(payment, false, true)).status, 'pending');
+  assert.equal((await service.classify(payment, false, true)).status, 'registered');
   assert.equal(mock.mock.callCount(), 0);
-  assert.equal((await service.classify(payment, true, true)).status, 'pending');
+  assert.equal((await service.classify(payment, true, true)).status, 'registered');
+  assert.equal(mock.mock.callCount(), 0);
+  const ambiguousPayment = { ...payment, text: payment.text + '\nValor recibido: COP 50.000.' };
+  assert.equal((await service.classify(ambiguousPayment, true, true)).status, 'pending');
   assert.equal(mock.mock.callCount(), 1);
   const [url, init] = mock.mock.calls[0].arguments as unknown as [string, RequestInit];
   assert.equal(url, 'https://api.openai.com/v1/responses');
@@ -167,5 +169,5 @@ test('uses rules for authenticated Bancolombia formats and sends only a protecte
   mock.mock.mockImplementationOnce(async () => Response.json({
     status: 'completed', output: [{ type: 'message', content: [{ type: 'refusal' }] }],
   }));
-  assert.equal((await service.classify(payment, true, true)).status, 'pending');
+  assert.equal((await service.classify(ambiguousPayment, true, true)).status, 'pending');
 });

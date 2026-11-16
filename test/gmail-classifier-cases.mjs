@@ -41,7 +41,7 @@ export const gmailClassifierCases = [
     id: 'own-transfer',
     subject: 'Traslado completado',
     text: 'Transferencia entre tus propias cuentas completada. Importe enviado: COP 15.000. Fecha de operación: 2026-11-11.',
-    expected: { status: 'pending' },
+    expected: { status: 'registered', fields: { ...expense, amountMinor: '1500000', category: 'otros' } },
   },
   {
     id: 'ambiguous-amounts',
@@ -65,7 +65,7 @@ export const gmailClassifierCases = [
     id: 'transfer-without-purpose',
     subject: 'Envío confirmado',
     text: 'Enviaste COP 15.000 el 2026-11-11. Destino: billetera digital.',
-    expected: { status: 'pending' },
+    expected: { status: 'registered', fields: { ...expense, amountMinor: '1500000', category: 'otros' } },
   },
   {
     id: 'legitimate-identical-amount-one',

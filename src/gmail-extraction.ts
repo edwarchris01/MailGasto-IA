@@ -36,10 +36,9 @@ export class GmailExtraction {
         receivedAt ? gmailReceivedDay(receivedAt) : undefined);
     if (!notice) return { status: 'ignored' as const };
     const checked = inspectGmailNotice(notice);
-    const local = resolveGmailExtraction(notice, null, true, checked);
+    const local = resolveGmailExtraction(notice, null, true, checked, receivedAt);
     const key = this.config.OPENAI_API_KEY;
-    if (!useOpenAi || !key || local.status !== 'pending' || 'avalCopy' in local || notice.unauthenticated ||
-        checked.ownTransfer || checked.walletPayout || checked.needsCreditReview || checked.needsPurposeReview) {
+    if (!useOpenAi || !key || local.status !== 'pending' || 'avalCopy' in local || notice.unauthenticated) {
       return { provider: notice.provider, forwarded: notice.forwarded, ...local };
     }
 
@@ -69,6 +68,6 @@ export class GmailExtraction {
     } catch {
       console.warn('OpenAI Gmail extraction did not return a usable response');
     }
-    return { provider: notice.provider, forwarded: notice.forwarded, ...resolveGmailExtraction(notice, model, true, checked) };
+    return { provider: notice.provider, forwarded: notice.forwarded, ...resolveGmailExtraction(notice, model, true, checked, receivedAt) };
   }
 }
