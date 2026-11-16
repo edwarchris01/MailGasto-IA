@@ -449,13 +449,13 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       const { reprocess } = (await (await request('mailboxes', 'GET', undefined, other)).json())[0];
       assert.ok(reprocess.finishedAt);
       assert.equal(reprocess.failure, null);
-      assert.deepEqual(reprocess.summary, { registered: 2, pending: 3, ignored: 1, skipped: 2 });
+      assert.deepEqual(reprocess.summary, { registered: 2, pending: 2, ignored: 2, skipped: 2 });
       const notices = await db.query('SELECT n.id,message_id,status,reason,amount_minor,payment_method,transaction_time,direction ' +
         'FROM notices n LEFT JOIN transactions t ON t.notice_id=n.id WHERE n.mailbox_id=$1 ORDER BY message_id', [linked]);
       assert.deepEqual(notices.rows.map(row => [row.message_id, row.status, row.amount_minor, row.payment_method, row.direction]), [
         ['direct', 'registered', '2500000', null, 'expense'],
         ['past-copy', 'pending', null, null, null],
-        ['past-not-authenticated', 'pending', null, null, null],
+        ['past-not-authenticated', 'discarded', null, null, null],
         ['past-payroll', 'registered', '112345001', null, 'income'],
         ['past-personal', 'discarded', null, null, null],
         ['past-qr', 'registered', '3510000', 'QR', 'expense'],
@@ -463,11 +463,13 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       ]);
       assert.equal(notices.rows[0].id, list.items[0].id);
       assert.equal(notices.rows[1].reason, 'possible_duplicate');
+      assert.equal(notices.rows[2].reason, 'not_transaction');
       assert.equal(notices.rows[3].transaction_time, '10:08');
       assert.equal(notices.rows[4].reason, 'not_transaction');
-      const dismissedId = outdated.rows.find(row => row.message_id === 'past-personal')!.id;
-      assert.equal((await request('notices/' + dismissedId, 'GET', undefined, other)).status, 404);
-      assert.equal((await db.query('SELECT reported_amount_minor FROM notices WHERE id=$1', [dismissedId])).rows[0].reported_amount_minor, null);
+      for (const dismissed of outdated.rows) {
+        assert.equal((await request('notices/' + dismissed.id, 'GET', undefined, other)).status, 404);
+        assert.equal((await db.query('SELECT reported_amount_minor FROM notices WHERE id=$1', [dismissed.id])).rows[0].reported_amount_minor, null);
+      }
       assert.equal(notices.rows[5].id, existing.rows[0].id);
       assert.equal((await db.query('SELECT count(*)::int AS count FROM outbox')).rows[0].count, messagesBefore);
       // A movement saved by the older workflow can be missing the time and method.
@@ -481,9 +483,10 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       assert.equal(await gmail.scanReprocessPage(), true);
       const repeatedWebhooksBefore = deliveries.length;
       const repeated = (await db.query('SELECT message_id FROM gmail_deliveries WHERE mailbox_id=$1 AND completed_at IS NULL', [linked])).rows;
-      for (const id of ['past-qr', 'past-copy', 'past-not-authenticated', 'past-uncertain']) {
+      for (const id of ['past-qr', 'past-copy', 'past-uncertain']) {
         assert(repeated.some(row => row.message_id === id), 'The repeat must include ' + id);
       }
+      assert(!repeated.some(row => row.message_id === 'past-not-authenticated'), 'An explicit rejected operation stays discarded');
       assert(repeated.every(row => row.message_id === 'direct' || Object.hasOwn(historical, row.message_id)));
       // Complete metadata needs no second read, and the synthetic current message may be beyond this snapshot.
       for (const _ of repeated) {
@@ -544,7 +547,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       { state: 'disconnected', providerRevoked: true });
     assert.equal((await (await post(renewed)).json()).outcome, 'discarded');
     assert.equal((await db.query('SELECT 1 FROM gmail_deliveries WHERE mailbox_id=$1 AND completed_at IS NULL', [linked])).rowCount, 0);
-    assert.equal((await (await request('notices', 'GET', undefined, other)).json()).items.length, 7);
+    assert.equal((await (await request('notices', 'GET', undefined, other)).json()).items.length, 6);
 
     const mobileOrigin = 'https://mailgasto.example.test';
     const fingerprint = Array(32).fill('AA').join(':');
