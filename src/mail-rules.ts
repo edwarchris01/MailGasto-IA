@@ -61,6 +61,7 @@ const cancelledPurchase = /\b(?:pago|compra|transaccion) (?:(?:fue|esta|ha sido|
 const processingError = /\b(?:transacci(?:o|\?|�)n (?:con |resulto en (?:un )?)error|se produjo un error en el pago|no pudimos (?:procesar|realizar|completar) (?:tu |su |el )?(?:pago|cobro)|no hemos recibido (?:tu|su) pago)\b|(?:^|\n)[ \t]*estado(?:[ \t]*:[ \t]*|[ \t]{2,}|\t+)[ \t]*(?:error|rechazad[oa]|cancelad[oa]|pendiente|en proceso|programad[oa]|declined|failed|rejected|cancelled|canceled|pending|scheduled)\b/i;
 const unsuccessfulPayment = /\bno se pudo hacer (?:tu|su|el) pago\b/;
 const blockedOperationState = /\b(?:estado|status)[ \t]*:[ \t]*(?:rechazad[oa]|cancelad[oa]|pendiente|en proceso|programad[oa]|declined|failed|rejected|cancelled|canceled|pending|scheduled)\b/i;
+const separatedOperationState = /\b(?:pago|compra|transferencia|transaccion|abono)\b(?:(?!\b(?:pago|compra|transferencia|transaccion|abono)\b)(?:[^.!?\n;]|\.(?=\d))){1,110}?\b(rechazad[oa]|declinad[oa]|fallid[oa]|cancelad[oa]|pendiente|programad[oa]|en proceso)\b/g;
 const unpaidAccountNotice = /\b(?:past due balance|account suspended for nonpayment|account suspension warning|still unpaid|please complete payment|issue while attempting to (?:automatically )?charge)\b/;
 const qaSubject = /\b(?:aviso qa|mailgasto.{0,12}\bqa|(?:aviso|pago|transaccion|compra|comprobante|confirmacion) de prueba|sandbox)\b/;
 const expenseEvidence = /\b(?:pagaste|compraste|enviaste|transferiste|retiraste|(?:recibimos|hemos recibido) (?:tu|su) pago|(?:realizaste|hiciste) un (?:pago|retiro)|te (?:debitaron|cobraron|descontaron)|se (?:te )?(?:debito|cobro)|se realizaron los cargos|se proceso su pago|compra (?:fue )?(?:confirmada|aprobada|realizada|exitosa|procesada|completada)|(?:tu|su) pago (?:(?:fue|ha sido) )?(?:confirmado|aprobado|realizado|exitoso|procesado|completado|aplicado)|el pago de tu pedido\b[^.!?\n]{0,120}\bfue confirmado|el pago de tu pedido\b[^.!?\n]{0,120}\bha sido confirmado)\b/;
@@ -133,9 +134,15 @@ function rejectedGmailNotice(subject: string, head: string, completion: string, 
 }
 
 function blocksGmailCompletion(text: string) {
-  const status = (completedRefund.test(text) || creditedRefund.test(text)) && !futureRefund.test(text) ? text.replace(cancelledPurchase, '') : text;
+  const refunded = (completedRefund.test(text) || creditedRefund.test(text)) && !futureRefund.test(text);
+  const status = refunded ? text.replace(cancelledPurchase, '') : text;
+  const separatedState = [...status.matchAll(separatedOperationState)].some(match => {
+    const prefix = status.slice(Math.max(0, match.index - 110), match.index).split(/[!?;\n]|\.(?!\d)/).at(-1) ?? '';
+    if (/\b(?:si|cuando|en caso de|anterior|previo|historico|previous|earlier)\b/.test(prefix + match[0])) return false;
+    return !(refunded && /^cancelad[oa]$/.test(match[1]) && /^(?:pago|compra|transaccion)\b/.test(match[0]));
+  });
   return notCompleted.test(status) || gmailRejected.test(status) || processingError.test(status) || unsuccessfulPayment.test(status) ||
-    blockedOperationState.test(status);
+    blockedOperationState.test(status) || separatedState;
 }
 
 function gmailPrimaryText(body: string) {

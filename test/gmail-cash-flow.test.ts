@@ -99,6 +99,28 @@ test('a rejected, canceled or pending operation is ignored even when the email r
     'La compra fue cancelada. Te reembolsaron COP 25.000 el 15/11/2026.').status, 'registered');
 });
 
+test('operation states separated by an amount are ignored without treating conditional or historical prose as the current state', () => {
+  for (const [subject, body] of [
+    ['Aviso de pago', 'Tu pago por COP 80.000 fue rechazado.'],
+    ['Aviso de compra', 'Tu compra por COP 80.000 fue cancelada.'],
+    ['Aviso de transferencia', 'Tu transferencia por COP 80.000 está pendiente.'],
+  ]) {
+    assert.equal(isGmailExplicitNonMovement(subject, body), true, body);
+    assert.equal(classify(subject, body).status, 'ignored', body);
+  }
+  for (const note of [
+    'Si tu pago por COP 80.000 fue rechazado, comunícate con nosotros.',
+    'En caso de que tu compra por COP 80.000 fuera cancelada, comunícate con nosotros.',
+    'Tu pago anterior por COP 80.000 fue rechazado.',
+  ]) {
+    const body = 'Pagaste COP 80.000 el 15/11/2026.\n' + note;
+    assert.equal(isGmailExplicitNonMovement('Pago realizado', body), false, note);
+    assert.equal(classify('Pago realizado', body).status, 'registered', note);
+  }
+  assert.equal(classify('Reembolso acreditado',
+    'Tu compra por COP 80.000 fue cancelada. Te reembolsaron COP 80.000 el 15/11/2026.').status, 'registered');
+});
+
 test('DigitalOcean failed charges and nonpayment notices are explicit non-movements', () => {
   for (const [subject, body] of [
     ['DigitalOcean - Failed to process card payment', 'Failed Card Payment. We attempted to charge the card ending in 1234 but the charge failed.'],
