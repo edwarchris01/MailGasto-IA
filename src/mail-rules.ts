@@ -84,6 +84,8 @@ const abandonedCheckout = /\b(?:completa tu compra|retomar compra|retoma tu comp
 const welcomeNotice = /\b(?:bienvenid[oa]s?|te damos la bienvenida)\b/;
 const welcomeOffer = /\b(?:suscripcion incluida|canal premium|tarifa vigente|consulta promociones)\b|\$[ \t]*0[ \t]*\/[ \t]*mes\b/;
 const noChargeOffer = /\b(?:esto )?no generara cobros\b|\bno se (?:generaran|realizaran) cobros\b/;
+const contentNotification = /\b(?:newsletter|in this edition|en esta edicion|ha publicado contenido recientemente|inactivity reminder|recordatorio de inactividad|workflow run|run failed|pull request|automated review|review suggestions)\b|\bpr[ \t]*#?[ \t]*\d+\b/;
+const promotionalNotice = /\b(?:acumula puntos|marcas donde puedes comprar|compra en marcas aliadas|compra inteligente|black days|black friday|recibe plata de vuelta por cada compra|que es la compra de cartera|alternativa de financiacion que te permite trasladar obligaciones|mas descuentos para ti|beneficios exclusivos|recarga tu saldo|aun estas a tiempo de (?:obtener|participar)|suma que suma esta por terminar|registrate[^.!?\n]{0,80}empieza a sumar)\b/;
 const sentAmountEvidence = /\bimporte enviado\b/;
 const cardLabel = /(?:tarjeta(?:[ \t]+(?:de[ \t]+)?(?:d[eé]bito|cr[eé]dito))?|t[ \t]*\.[ \t]*(?:d[eé]b(?:ito)?|cr[eé]d(?:ito)?))\b/.source;
 const cardNumberPrefix = /[ \t]*\.?[ \t]*(?:(?:terminad[ao][ \t]+en|n[uú]mero|nro\.?|no\.?|de|es)[ \t]+)?[:# \t-]*/.source;
@@ -137,6 +139,7 @@ function rejectedGmailNotice(subject: string, head: string, completion: string, 
   return excludedSubject.test(subject) || unpaidInvoice || unprocessedPayment || unpaidReminder || excluded.test(head) || blocksGmailCompletion(head) ||
     mailingListDelivery.test(completion) || employmentAlert.test(notice) || abandonedCheckout.test(notice) ||
     welcomeNotice.test(notice) && welcomeOffer.test(notice) || noChargeOffer.test(notice) || unpaidAccountNotice.test(notice) ||
+    contentNotification.test(notice) || promotionalNotice.test(notice) || informationalOnly.test(notice) ||
     qaSubject.test(subject) || (noChargeTrial.test(head) && !confirmedAmountPaid.test(head));
 }
 
@@ -171,7 +174,10 @@ export function isGmailExplicitNonMovement(subject: string, body: string) {
   const invoice = electronicInvoice.test(subjectText) || /\bfactura electronica de venta\b/.test(head);
   if (/^\s*\[mailgasto ia\]|\b(?:aviso|pago|transaccion|compra|comprobante|confirmacion) de prueba\b/.test(subjectText)) return true;
   if (blocksGmailCompletion(subjectText + '\n' + bodyText)) return true;
-  if ((gmailHasExpense(bodyText) || gmailHasIncome(bodyText)) && !qaSubject.test(subjectText)) return false;
+  // Explicitly completed receipt formats can use structured state fields instead of a past-tense verb.
+  // This protects paid receipts with an informational footer; it does not bypass sender/amount validation.
+  const receiptCompleted = Object.values(gmailReceiptSenders).some(format => receiptDirection(format, subjectText, bodyText));
+  if ((gmailHasExpense(bodyText) || gmailHasIncome(bodyText) || receiptCompleted) && !qaSubject.test(subjectText)) return false;
   return rejectedGmailNotice(subjectText, head, bodyText, invoice) || englishRequest.test(head) ||
     (futureRefund.test(head) && !completedRefund.test(head));
 }

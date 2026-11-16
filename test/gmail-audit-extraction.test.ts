@@ -150,6 +150,52 @@ test('Claro video welcome pricing and a no-charge offer are explicitly ignored, 
   assert.deepEqual([result.movement?.amountMinor, result.movement?.direction], ['3590000', 'expense']);
 });
 
+test('confirmed marketing, technical notifications and unpaid reminders explicitly discard old pending notices', () => {
+  const cases = [
+    ['Fusion Hub Inactivity Reminder', 'Recordatorio de inactividad. No has accedido a este hub desde el 12 de enero de 2027.'],
+    ['Who Gets The HOURS AI Gives Back?', 'In this edition, your skill stack got a promotion. Did your pay get the memo?'],
+    ['Una persona con el cargo de IT Leader en Bancolombia ha publicado contenido recientemente', 'Estamos en búsqueda de talento.'],
+    ['Acumula Puntos en tus marcas favoritas', 'Descubre marcas donde puedes comprar y acumular. Tienes 580 Puntos. Compra en marcas aliadas.'],
+    ['Tu billetera te va a amar por esto', 'Compra inteligente en estos Black Days. Usa tu RappiCard y recibe plata de vuelta por cada compra.'],
+    ['¿Muchas cuotas por pagar? Descubre cómo simplificarlas', '¿Qué es la compra de cartera? Es una alternativa de financiación que te permite trasladar obligaciones a un nuevo crédito.'],
+    ['Notificación reporte centrales de riesgo', 'Tu obligación registra mora. Saldo total a pagar COP 812.795.'],
+    ['¡Más descuentos para ti!', 'Recarga tu saldo y aprovecha beneficios exclusivos en MercadoLibre.'],
+    ['[ms-payment-service] Run failed', 'Workflow run failed. View jobs and annotations for this commit.'],
+    ['Facturar suscripciones y add-ons de StylePlus con Alanube (PR28)', 'Automated review suggestions for this code commit and pull request.'],
+    ['StylePlus No esperes Black Friday para ganar', 'Aún estás a tiempo de obtener 5.000 PuntosColombia. ¿Todavía no recibes pagos con Wompi? ' +
+      'Puedes comprar tu datáfono o activar la app para recibir pagos. Con sólo $50.000 en pagos ya entras a participar por 5.000 Puntos. Activa y empieza a sumar.'],
+    ['StylePlus ¡solo queda 1 semana! Descubre la recompensa que te espera', 'Regístrate, conoce tu meta y empieza a sumar. Suma que suma está por terminar.'],
+    ['Llegó tu factura noviembre', 'Valor total a pagar COP 921.089. Fecha límite de pago 30/11/2026.'],
+  ];
+  for (const [subject, body] of cases) {
+    assert.equal(isGmailExplicitNonMovement(subject, body), true, subject);
+    assert.equal(candidate('notificaciones@synthetic.example', subject, body, gmailBankSenders, true), null, subject);
+    assert.equal(resolveGmailExtraction({ provider: 'other', forwarded: false, subject, body }, null,
+      true, undefined, '2026-11-16T03:00:00Z').status, 'ignored', subject);
+  }
+});
+
+test('real cash-flow evidence survives marketing and structured paid receipts survive unpaid-bill labels', () => {
+  for (const [subject, body, direction] of [
+    ['Tu recibo de GitHub', 'We received your payment. Amount paid: USD 4.00. Payment date: 2026-11-15.\nWorkflow run details are available in your account.', 'expense'],
+    ['Compra Black Friday', 'Compraste COP 25.000 el 15/11/2026. Acumula Puntos en tus marcas favoritas.', 'expense'],
+    ['Devolución RappiCard', 'Te reembolsaron COP 25.000 el 15/11/2026. Compra inteligente en estos Black Days.', 'income'],
+  ]) {
+    assert.equal(isGmailExplicitNonMovement(subject, body), false, subject);
+    const notice = candidate('recibos@synthetic.example', subject, body, gmailBankSenders, true);
+    assert.ok(notice, subject);
+    const result = resolveGmailExtraction(notice, null, true);
+    assert.equal(result.status, 'registered', subject);
+    assert.equal(result.movement?.direction, direction, subject);
+  }
+  const subject = 'PSE - Transacción aprobada';
+  const body = 'Valor: COP 45.000\nFecha de la transacción: 15/11/2026\nDescripción: Pago de factura\nTotal a pagar COP 45.000.';
+  assert.equal(isGmailExplicitNonMovement(subject, body), false);
+  const notice = candidate('serviciopse@achcolombia.com.co', subject, body, gmailBankSenders, true);
+  assert.ok(notice);
+  assert.equal(resolveGmailExtraction(notice, null, true).status, 'registered');
+});
+
 test('Nequi outgoing Bre-B registers bare amounts and Spanish dates without requiring a purpose', () => {
   for (const [amount, clock, expectedTime] of [['80.000', 'a la 1:12 a.m.', '01:12'], ['440.000', 'a las 4:13 a.m.', '04:13']]) {
     const notice = candidate('notificaciones@nequi.com.co', '¡Enviaste plata por Bre-B!',
