@@ -180,6 +180,8 @@ test('SMS reversal negations, promises, requests and pending states never imply 
   for (const body of [
     'NEQUI: No reversamos 300,00 de tu compra a tu Tarjeta.',
     'NEQUI: Nunca reversamos 300,00 de tu compra a tu Tarjeta.',
+    'NEQUI: No te reversamos 300,00 de tu compra a tu Tarjeta.',
+    'NEQUI: Nunca te reversamos 300,00 de tu compra a tu Tarjeta.',
     'NEQUI: Reversaremos 300,00 de tu compra a tu Tarjeta.',
     'NEQUI: Vamos a reversar 300,00 de tu compra a tu Tarjeta.',
     'NEQUI: Si reversamos 300,00 de tu compra, te avisaremos.',

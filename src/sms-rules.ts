@@ -21,7 +21,7 @@ const nequiOutgoingAccount = /\b(?:enviaste|transferiste|pagaste|compraste|retir
 const equivalentIncomingVerb = /\b(?:te envi[oó]|te lleg[oó](?: (?:plata|dinero))?(?: por)?|has recibido|reversamos)[ \t]+(?=(?:COP[ \t]*|USD[ \t]*|EUR[ \t]*|US\$[ \t]*|[$€][ \t]*)?\d)/giu;
 const futureOrNegatedIncome = /\b(?:te (?:enviara|enviaran|va a enviar|van a enviar|llegara|llegaran)|recibiras|no (?:has recibido|te (?:llego|envio)))\b/;
 const negatedMoneyFlow = /\bno (?:se )?te (?:enviaron|transfirieron|abonaron|acreditaron|consignaron|reembolsaron|devolvieron|debitaron|cobraron|descontaron)\b/;
-const nonEffectiveReversal = /\b(?:(?:no|nunca) reversamos|reversaremos|vamos a reversar|solicitud de revers(?:ion|o)|revers(?:ion|o) (?:pendiente|en proceso|solicitad[oa]))\b/;
+const nonEffectiveReversal = /\b(?:(?:no|nunca)(?:[ \t]+te)?[ \t]+reversamos|reversaremos|vamos a reversar|solicitud de revers(?:ion|o)|revers(?:ion|o) (?:pendiente|en proceso|solicitad[oa]))\b/;
 
 function smsOperationText(body: string) {
   const principal = body.split(/(?:[.!?]\s+|\n)(?:si|en caso de que)\s+/i, 1)[0];
@@ -29,7 +29,7 @@ function smsOperationText(body: string) {
   // Equivalent completed-money verbs only. Amounts, dates and source labels are unchanged.
   return principal.replace(equivalentIncomingVerb, (verb: string, offset: number) => {
     const prefix = normalize(principal.slice(Math.max(0, offset - 220), offset)).split(/[!?;\n]|\.(?!\d)/).at(-1) ?? '';
-    if (/\b(?:no|nunca)[ \t]+$|\b(?:si|cuando|en caso|quizas?|tal vez|podria|habria)\b/.test(prefix)) return verb;
+    if (/\b(?:no|nunca)(?:[ \t]+te)?[ \t]+$|\b(?:si|cuando|en caso|quizas?|tal vez|podria|habria)\b/.test(prefix)) return verb;
     return /^reversamos\b/i.test(verb) ? 'Te reembolsaron ' : 'Te abonaron ';
   });
 }
