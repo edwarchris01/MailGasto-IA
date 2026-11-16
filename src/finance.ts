@@ -113,7 +113,7 @@ export class Finance {
     const { rows: [movement] } = await this.db.query<Movement>(
       'SELECT ' + fields + ',m.note,m.original_amount_minor::text,m.original_transaction_date::text,m.correction_revision,' +
       "COALESCE(n.reported_transaction_date::text,CASE WHEN s.date_source='reported' THEN s.transaction_date::text END) AS reported_transaction_date," +
-      "COALESCE(n.transaction_time,s.transaction_time) AS transaction_time,COALESCE(n.reported_institution,CASE WHEN s.id IS NOT NULL THEN 'Nequi' END) AS reported_institution," +
+      "COALESCE(n.transaction_time,s.transaction_time) AS transaction_time,COALESCE(n.reported_institution,CASE WHEN s.id IS NOT NULL THEN 'nequi' END) AS reported_institution," +
       "CASE WHEN lower(m.payment_method)='tarjeta' THEN n.card_type END AS card_type," +
       "CASE WHEN lower(m.payment_method)='tarjeta' THEN n.card_last4 END AS card_last4 " +
       'FROM confirmed_movements m LEFT JOIN notices n ON n.id=m.notice_id LEFT JOIN sms_movements s ON s.id=m.id ' +

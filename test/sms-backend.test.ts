@@ -61,6 +61,7 @@ test('SMS imports remain scoped, private, idempotent, editable and distinct from
     assert.deepEqual([detail.source,detail.provider,detail.amount_minor,detail.direction,detail.transaction_date,detail.date_source,detail.transaction_time],
       ['sms','nequi','30000000','income','2026-11-15','received_at','10:20:00']);
     assert.equal(detail.notice_id,null);assert.equal(detail.reported_transaction_date,null);assert.equal(detail.correction_revision,0);
+    assert.equal(detail.reported_institution,'nequi','Match the shared lowercase institution contract used by Flutter');
     assert.doesNotMatch(JSON.stringify(detail),/PERSONA SINTETICA|85954/);
     assert.equal((await request('movements/'+movementId,'GET',undefined,other.cookie)).status,404);
     assert.equal((await db.query('SELECT count(*)::int AS count FROM notices')).rows[0].count,0);
