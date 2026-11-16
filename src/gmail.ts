@@ -8,7 +8,7 @@ import { GmailExtraction } from './gmail-extraction.js';
 import { readGmailMime } from './gmail-mime.js';
 import { finishGmailDelivery, GmailResults, gmailDeliveryRetryDelay, logGmailDelivery,
   maxGmailDeliveryAttempts, messageIdPattern } from './gmail-results.js';
-import { gmailForwarded, isGmailExplicitNonMovement } from './mail-rules.js';
+import { gmailForwarded, inspectGmailNotice, isGmailExplicitNonMovement } from './mail-rules.js';
 
 const gmailScope = 'https://www.googleapis.com/auth/gmail.readonly';
 const gmailRoot = 'https://gmail.googleapis.com/gmail/v1/users/me/';
@@ -16,7 +16,7 @@ const tokenUrl = 'https://oauth2.googleapis.com/token';
 const maxRawSize = 1_500_000;
 const maxReprocessAttempts = 5;
 // Bump when extraction rules change: unresolved notices receive one new review.
-export const gmailClassifierVersion = '2026-11-16.4';
+export const gmailClassifierVersion = '2026-11-16.5';
 const recoverableDeliveryErrors = ['webhook_timeout', 'webhook_unavailable', 'callback_timeout',
   'gmail_processing_failed', 'attempts_exhausted', 'extractor_unavailable', 'ollama_unavailable', 'invalid_model_output'];
 
@@ -582,8 +582,21 @@ export class Gmail {
         const alternate = { ...email, text: alternative };
         const alternateResult = await this.extraction.classify(alternate, false, authenticated, identity.receivedAt);
         const readable = classification.status !== 'ignored' ? classification : alternateResult;
-        if (readable.status !== 'ignored' &&
-            (isGmailExplicitNonMovement(email.subject, email.text) || isGmailExplicitNonMovement(alternate.subject, alternate.text))) {
+        const primaryNonMovement = isGmailExplicitNonMovement(email.subject, email.text);
+        const alternateNonMovement = isGmailExplicitNonMovement(alternate.subject, alternate.text);
+        if (readable.status !== 'ignored' && (primaryNonMovement || alternateNonMovement)) {
+          // A broken/plain preview of an offer can contain an amount without showing any cash flow.
+          // Retain a conflict only when a part independently describes a completed operation, even
+          // if its amount/date is incomplete. Never combine fields from different MIME versions.
+          const hasOperation = (body: string, result: typeof classification, nonMovement: boolean) =>
+            !nonMovement && (result.status === 'registered' || result.status === 'pending' &&
+              (result.evidence?.direction != null || inspectGmailNotice({ subject: email.subject, body }).hasCompletion));
+          if (!hasOperation(email.text, classification, primaryNonMovement) &&
+              !hasOperation(alternate.text, alternateResult, alternateNonMovement)) {
+            stage = 'store_mime_non_movement';
+            await this.results.save({ source: 'oauth', ...identity, status: 'ignored' }, { explicitNonMovement: true });
+            return true;
+          }
           stage = 'store_mime_conflict';
           await this.results.save({ source: 'oauth', ...identity, provider: readable.provider, forwarded: readable.forwarded,
             status: 'pending', reason: 'unconfirmed_extraction', confidence: 0 });
@@ -662,7 +675,7 @@ export class Gmail {
         await this.results.save({ source: 'oauth', ...identity, ...classification },
           {
             verifiedBank: authenticated && classification.status === 'registered' && !classification.forwarded && classification.provider !== 'other',
-            explicitNonMovement: authenticated && classification.status === 'ignored' &&
+            explicitNonMovement: classification.status === 'ignored' &&
               (isGmailExplicitNonMovement(email.subject, email.text) ||
                 alternative !== undefined && isGmailExplicitNonMovement(email.subject, alternative)),
           });

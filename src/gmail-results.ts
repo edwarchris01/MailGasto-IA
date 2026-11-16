@@ -245,7 +245,10 @@ export class GmailResults {
       }
       result = requireGmailAuthentication(result, authenticated, forwarded);
       verifiedBank &&= authenticated && !forwarded;
-      explicitNonMovement &&= authenticated && !forwarded;
+      // OAuth already binds this message to the owner's mailbox and current delivery above.
+      // Deterministically excluding an unpaid bill/offer does not establish a financial record;
+      // keep sender authentication mandatory for registering or enriching movements.
+      explicitNonMovement &&= (oauth || authenticated) && !forwarded;
       const fingerprints = operationFingerprints(result, mailbox.account_id, this.config.encryptionKey);
       if (result.status === 'registered' || fingerprints.length) {
         await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,1))', [mailbox.account_id]);
