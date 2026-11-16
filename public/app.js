@@ -85,14 +85,24 @@ async function loadNotices() {
   $('notice-detail').replaceChildren();
   for (const row of notices.items) {
     const label = row.provider === 'other' ? 'Otro remitente' : row.provider;
-    const li = element('li', statuses[row.status] + ' · ' + label + (row.amount_minor ? ' · ' + money(row.amount_minor, row.currency) : ''));
+    const direction = row.direction === 'income' ? 'Ingreso' : row.direction === 'expense' ? 'Gasto' : null;
+    const li = element('li', [statuses[row.status], direction, label,
+      row.amount_minor && money(row.amount_minor, row.currency)].filter(Boolean).join(' · '));
     const detail = element('button', 'Ver detalle');
     action(detail, 'click', async () => {
       const value = await api('notices/' + row.id);
-      const data = [statuses[value.status], value.transaction_date, value.description,
+      const data = [statuses[value.status], direction, value.transaction_date, value.description,
         value.payment_method ?? (value.status === 'registered' ? 'Sin especificar' : null),
         categoryNames[value.category], value.amount_minor && money(value.amount_minor, value.currency)].filter(Boolean);
       $('notice-detail').replaceChildren(element('p', data.join(' · ')));
+      if (value.date_source === 'received_at' && value.received_at) {
+        const receipt = new Intl.DateTimeFormat('es-CO', {
+          timeZone: 'America/Bogota', dateStyle: 'medium', timeStyle: 'short',
+        }).format(new Date(value.received_at));
+        $('notice-detail').append(element('p', 'El correo no indicaba la fecha del movimiento. '
+          + 'Se usó la recepción como referencia: ' + receipt + ' (hora de Colombia). '
+          + 'Puedes corregir los datos desde el detalle del movimiento en la app.'));
+      }
     });
     li.append(detail);
     $('notices').append(li);

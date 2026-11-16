@@ -188,13 +188,10 @@ return $input.all().map(({json}, i) => {
         gmailReceivedDay(identity.receivedAt)) : null;
   const notice = filtered && forwarded ? { ...filtered, forwarded: true } : filtered;
   const verified = notice && inspectGmailNotice(notice);
-  const reviewLocally = notice && (notice.unauthenticated || notice.format === 'avalpay' && notice.references?.length ||
-    verified?.ownTransfer || verified?.walletPayout ||
-    verified?.needsCreditReview || verified?.needsPurposeReview || verified?.refundPending);
-  const localResult = reviewLocally || verified?.knownReceipt
-    ? resolveGmailExtraction(notice, null, true, verified) : null;
-  const local = reviewLocally || (localResult?.status === 'registered' && localResult.movement.category !== 'otros')
-    ? localResult : null;
+  const localResult = notice
+    ? resolveGmailExtraction(notice, null, true, verified, identity.receivedAt) : null;
+  const local = localResult && (localResult.status === 'registered' || localResult.status === 'ignored' ||
+    notice.unauthenticated || notice.forwarded) ? localResult : null;
   const modelInput = notice && !local ? gmailModelInput(notice, verified) : null;
   return output({ identity, retryId, attempts, legacyReadFailed: legacyReadFailed || !validIdentity,
     authenticated: authenticated === true, notice, modelInput, local, startedProcessing: Date.now() }, i);
@@ -257,7 +254,7 @@ return $input.all().map(({json}, i) => {
   let outcome;
   if (legacyReadFailed || !notice) outcome = { status: 'ignored' };
   else if (local) outcome = local;
-  else if (model) outcome = resolveGmailExtraction(notice, model);
+  else if (model) outcome = resolveGmailExtraction(notice, model, false, undefined, identity.receivedAt);
   else {
     const error = typeof json.error === 'string' ? json.error : json.error?.message;
     const invalidOutput = !json.error || /model output|output pars(?:er|ing)|failed to parse|invalid json|output format/i.test(error ?? '');

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { gmailResult } from '../src/gmail-results.js';
-import { readGmailModel } from '../src/mail-rules.js';
+import { gmailModelInput, readGmailModel, resolveGmailExtraction } from '../src/mail-rules.js';
 import { agaval, agavalModel, agavalMovement, agavalSubject, bank, bankPurchase, bankPurchaseSubject, bankSender, filterAndResolve, flow, goodModel,
   legacyInput, oauthInput, runCode, shopSender, uncertainModel, wrap } from './pipeline.fixture.mjs';
 
@@ -18,24 +18,33 @@ test('both Gmail triggers use the same filter and the model receives only a sani
   const agent = flow.nodes.find(n => n.name === 'Clasificar aviso con AI Agent')!;
   const model = flow.nodes.find(n => n.name === 'Ollama Chat Model')!;
   const expression = agent.parameters.text.slice(3, -2).trim();
-  const modelInput = new Function('$json', 'return ' + expression)(filtered[1].json);
+  assert.equal(filtered[1].json.modelInput, null);
+  assert.equal(filtered[1].json.local.status, 'registered');
+  const sanitized = gmailModelInput(filtered[1].json.notice);
+  const modelInput = new Function('$json', 'return ' + expression)({ ...filtered[1].json, modelInput: sanitized });
   assert.equal(agent.type, '@n8n/n8n-nodes-langchain.agent');
   assert.equal(agent.parameters.options.maxIterations, 2);
   assert.equal(model.parameters.model, 'qwen3.5:4b');
   assert.deepEqual(JSON.parse(modelInput), {
-    provider: 'nequi', subject: 'Aviso de pago', body: filtered[1].json.modelInput.body,
+    provider: 'nequi', subject: 'Aviso de pago', body: sanitized.body,
     verified: { amountMinor: '2500000', currency: 'COP', date: '2026-11-10', direction: 'expense', paymentMethod: null,
       movementKind: 'payment', counterpartyRole: 'merchant' },
     evidenceHints: { amountMinor: 'COP 25.000', currency: 'COP', date: '10/11/2026', direction: 'Pagaste',
       classification: 'Pagaste' },
   });
   assert.doesNotMatch(modelInput, /12345678901|https:|@example|oauth-fixture|deliveryId/);
+  const ambiguous = runCode('Filtrar y proteger aviso', legacyInput('ambiguous', receivedAt,
+    text + '\nFecha del pago: 11/11/2026.'))[0].json;
+  assert.equal(ambiguous.local, null);
+  assert.ok(ambiguous.modelInput);
+  assert.doesNotMatch(JSON.stringify(ambiguous.modelInput), /12345678901|https:|@example|deliveryId|receivedAt|authenticated/);
   assert.ok(gmailResult.safeParse(filterAndResolve(direct)).success);
   assert.ok(gmailResult.safeParse(filterAndResolve(oauth)).success);
   assert.equal(filterAndResolve(legacyInput('spam', receivedAt, bank, bankSender, 'Aviso de pago', ['SPAM'])), undefined);
   const unknown = legacyInput('unknown', receivedAt, bank, shopSender, 'Aviso de pago');
   const badModel = filterAndResolve(unknown, { ...goodModel, amountMinor: '5000000' });
-  assert.equal(badModel.status, 'pending');
+  assert.equal(badModel.status, 'registered');
+  assert.equal(badModel.movement.amountMinor, '2500000');
   assert.equal(filterAndResolve(direct, { ...goodModel, amountMinor: '5000000' }).movement?.amountMinor, '2500000');
   const card = filterAndResolve(legacyInput('card', receivedAt, 'Compraste USD 12.50 con tarjeta 1234 el 10/11/2026.',
     'tarjeta@bancolombia.example', 'Compra con tarjeta'), uncertainModel);
@@ -59,7 +68,7 @@ test('keeps a Movistar applied payment when the model misclassifies its state', 
     assert.equal(outcome.status, 'registered');
     assert.deepEqual(outcome.movement, { amountMinor: '6000000', currency: 'COP', date: '2026-09-28',
       direction: 'expense', description: 'Movistar', category: 'otros', paymentMethod: null,
-      cardType: null, cardLast4: null, transactionTime: null, reportedInstitution: null });
+      cardType: null, cardLast4: null, transactionTime: null, reportedInstitution: null, dateSource: 'reported' });
   }
   const contradictory = legacyInput('movistar-conflict', receivedAt, text +
     '\nSu pago por $ 75.000 del 29/09/2026 se aplicó correctamente a la cuenta 1234567891.', from, subject);
@@ -91,7 +100,7 @@ test('both Gmail paths save the purchase time and masked debit card for the supp
     assert.equal(result.status, 'registered');
     assert.equal(result.provider, provider);
     assert.deepEqual(result.movement, {
-      amountMinor: '3075000', currency: 'COP', date: '2026-11-10', transactionTime: '14:42',
+      amountMinor: '3075000', currency: 'COP', date: '2026-11-10', dateSource: 'reported', transactionTime: '14:42',
       paymentMethod: 'Tarjeta', cardType: 'debit', cardLast4: '1234', reportedInstitution: 'bancolombia',
       description: 'MERCADO DEL BUENO', category: 'otros', direction: 'expense',
     });
@@ -171,21 +180,21 @@ test('registers Agaval as Compras through Gmail direct and OAuth with no invente
     const result = filterAndResolve(input, agavalModel);
     assert.equal(result.status, 'registered');
     assert.equal(result.provider, 'other');
-    assert.deepEqual(result.movement, agavalMovement);
+    assert.deepEqual(result.movement, { ...agavalMovement, dateSource: 'reported' });
     assert.ok(gmailResult.safeParse(result).success);
   }
   const receiptWithoutTime = legacyInput('agaval-without-time', receivedAt, agaval.replace(' a las 12:00pm', ''), shopSender, agavalSubject);
   assert.deepEqual(filterAndResolve(receiptWithoutTime, { ...agavalModel, description: 'Pago de ropa en Agaval' }).movement,
-    { ...agavalMovement, description: 'almacenes Agaval', transactionTime: null });
-  assert.equal(filterAndResolve(direct, null).status, 'retry');
+    { ...agavalMovement, dateSource: 'reported', description: 'almacenes Agaval', transactionTime: null });
+  assert.equal(filterAndResolve(direct, null).status, 'registered');
   const subjectOnly = legacyInput('subject-only', receivedAt, '', shopSender, agavalSubject);
   assert.equal(filterAndResolve(subjectOnly, agavalModel).status, 'pending');
   const canceled = legacyInput('canceled', receivedAt, agaval + ' Tu pago fue cancelado.', shopSender, agavalSubject);
-  assert.equal(filterAndResolve(canceled, agavalModel).status, 'pending');
+  assert.equal(filterAndResolve(canceled, agavalModel), undefined);
   const notTransaction = {
     ...uncertainModel, classification: 'not_transaction',
   };
-  assert.equal(filterAndResolve(direct, notTransaction).status, 'pending');
+  assert.equal(filterAndResolve(direct, notTransaction).status, 'registered');
   const contradictory = legacyInput('contradictory', receivedAt,
     'Pagaste COP 50.000 y transferiste COP 60.000 el 10/11/2026.', shopSender, agavalSubject);
   assert.ok(filterAndResolve(contradictory, notTransaction).unconfirmedFields.includes('amount'));
@@ -209,7 +218,7 @@ test('uses literal evidence for categories and gives the purchase concept in the
   assert.equal(extract(agaval + '\nDescripción\tmedicamentos', agavalSubject).category, 'salud');
   assert.equal(extract(agaval + ' Producto: botas de senderismo.', 'Pago confirmado', {
     ...agavalModel, evidence: { ...agavalModel.evidence, category: 'botas de senderismo' },
-  }).category, 'compras');
+  }).category, 'otros');
   assert.equal(extract(agaval + ' Conceptos: calzado y medicamentos.', agavalSubject).category, 'otros');
   for (const [text, currency] of [['EUR 50.000', 'EUR'], ['50.000 USD', 'USD'], ['50.000. Moneda: USD.', 'USD']]) {
     assert.equal(extract(agaval.replace('COP 50.000', text), agavalSubject, { ...agavalModel, currency,
@@ -248,16 +257,19 @@ test('checks repeated fields before the model and preserves conflicts in the fin
   assert.equal(distantInput.verified.date, null);
 });
 
-test('agent JSON stays paired with each notice and rejects a malformed reply or numeric amount', () => {
+test('agent JSON stays paired, literal movements survive model failure and unresolved notices reject malformed output', () => {
   const receivedAt = '2026-11-10T13:00:00.000Z';
   const direct = legacyInput('first', receivedAt);
   const usd = legacyInput('second', receivedAt, 'Compraste USD 12.50 el 10/11/2026 en Farmacia Demo con tarjeta.',
     'tarjeta@bancolombia.example', 'Compra con tarjeta');
-  const filtered = runCode('Filtrar y proteger aviso', [...direct, ...usd]);
-  const outputs = [wrap({ output: JSON.stringify(goodModel) }), wrap({ output: 'invalid JSON' })];
+  const unresolved = legacyInput('third', receivedAt,
+    'Pagaste COP 25.000 o COP 30.000 el 10/11/2026.');
+  const filtered = runCode('Filtrar y proteger aviso', [...direct, ...usd, ...unresolved]);
+  assert.equal(filtered[2].json.local, null);
+  const outputs = [wrap({ output: JSON.stringify(goodModel) }), wrap({ output: 'invalid JSON' }), wrap({ output: 'invalid JSON' })];
   const results = runCode('Preparar resultado para NestJS', outputs, { 'Filtrar y proteger aviso': filtered });
   assert.deepEqual(results.map(({json}) => [json.result.messageId, json.result.movement?.amountMinor ?? json.result.reason]), [
-    ['first', '2500000'], ['second', 'invalid_model_output'],
+    ['first', '2500000'], ['second', '1250'], ['third', 'invalid_model_output'],
   ]);
   assert.equal(readGmailModel({ ...goodModel, amountMinor: 2500000 }), null);
 });
@@ -278,19 +290,29 @@ test('requires quotes that prove the current English payment and the role of eac
   };
   const result = filterAndResolve(input, model);
   assert.equal(result.status, 'registered');
-  assert.equal(result.movement.category, 'compras');
+  assert.equal(result.movement.category, 'otros');
   assert.equal(result.movement.amountMinor, '2200');
   assert.equal(result.movement.date, '2026-11-10');
+  const notice = runCode('Filtrar y proteger aviso', input)[0].json.notice;
+  const modelOnly = (value: unknown) => resolveGmailExtraction(notice, readGmailModel(value), false, undefined, receivedAt);
+  const quoted = modelOnly(model);
+  assert.equal(quoted.status, 'registered');
+  assert.ok('movement' in quoted);
+  assert.equal(quoted.movement.category, 'compras');
   for (const evidence of [
     { amountMinor: 'Subtotal: USD 20.00' }, { date: 'Issue date: 2026-11-07' },
     { direction: 'Previous attempt: payment declined' }, { currency: 'EUR' },
   ]) {
-    const pending = filterAndResolve(input, { ...model, evidence: { ...model.evidence, ...evidence } });
+    const pending = modelOnly({ ...model, evidence: { ...model.evidence, ...evidence } });
     assert.equal(pending.status, 'pending');
+    assert.ok('evidence' in pending);
     assert.equal(pending.evidence.amountMinor, '2200');
+    assert.equal(filterAndResolve(input, { ...model, evidence: { ...model.evidence, ...evidence } }).status, 'registered');
   }
-  const incidental = filterAndResolve(input, { ...model, category: 'salud',
+  const incidental = modelOnly({ ...model, category: 'salud',
     evidence: { ...model.evidence, category: 'hospital' } },
   );
+  assert.ok('movement' in incidental);
   assert.equal(incidental.movement.category, 'otros');
 });
+
