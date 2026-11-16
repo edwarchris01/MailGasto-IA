@@ -81,6 +81,9 @@ const receiptEvidence = /\b(?:we(?:'ve)? received (?:your )?payment|pago exitoso
 const mailingListDelivery = /\b(?:recibiste|recibes) este (?:mail|correo(?: electronico)?|mensaje) porque\b|\brecibes (?:emails|correos(?: electronicos)?) sobre notificaciones\b/;
 const employmentAlert = /\b(?:empresas que buscan personal|buscan personal para (?:el puesto|tu cargo)|tendencias de la ultima semana en empleos|han? contratado a profesionales cerca de ti|alertas? de empleos?)\b/;
 const abandonedCheckout = /\b(?:completa tu compra|retomar compra|retoma tu compra|finaliza tu compra|no finalizaste el proceso|compra (?:no completada|incompleta)|complete your purchase|abandoned checkout)\b/;
+const welcomeNotice = /\b(?:bienvenid[oa]s?|te damos la bienvenida)\b/;
+const welcomeOffer = /\b(?:suscripcion incluida|canal premium|tarifa vigente|consulta promociones)\b|\$[ \t]*0[ \t]*\/[ \t]*mes\b/;
+const noChargeOffer = /\b(?:esto )?no generara cobros\b|\bno se (?:generaran|realizaran) cobros\b/;
 const sentAmountEvidence = /\bimporte enviado\b/;
 const cardLabel = /(?:tarjeta(?:[ \t]+(?:de[ \t]+)?(?:d[eé]bito|cr[eé]dito))?|t[ \t]*\.[ \t]*(?:d[eé]b(?:ito)?|cr[eé]d(?:ito)?))\b/.source;
 const cardNumberPrefix = /[ \t]*\.?[ \t]*(?:(?:terminad[ao][ \t]+en|n[uú]mero|nro\.?|no\.?|de|es)[ \t]+)?[:# \t-]*/.source;
@@ -124,6 +127,7 @@ function address(value: string) {
 }
 
 function rejectedGmailNotice(subject: string, head: string, completion: string, invoice: boolean) {
+  const notice = subject + '\n' + completion;
   const unpaidInvoice = invoice && !(invoicePayment.test(completion) ||
     (expenseEvidence.test(completion) && !informationalOnly.test(head) && !futurePayment.test(completion)));
   const unprocessedPayment = futurePayment.test(completion) && !expenseEvidence.test(completion) &&
@@ -131,9 +135,8 @@ function rejectedGmailNotice(subject: string, head: string, completion: string, 
   const unpaidReminder = paymentReminder.test(subject) && /\bpast due balance\b/.test(head) &&
     !confirmedAmountPaid.test(completion) && !expenseEvidence.test(completion) && !receiptEvidence.test(completion);
   return excludedSubject.test(subject) || unpaidInvoice || unprocessedPayment || unpaidReminder || excluded.test(head) || blocksGmailCompletion(head) ||
-    mailingListDelivery.test(completion) || employmentAlert.test(subject + '\n' + completion) ||
-    abandonedCheckout.test(subject + '\n' + completion) ||
-    unpaidAccountNotice.test(subject + '\n' + completion) ||
+    mailingListDelivery.test(completion) || employmentAlert.test(notice) || abandonedCheckout.test(notice) ||
+    welcomeNotice.test(notice) && welcomeOffer.test(notice) || noChargeOffer.test(notice) || unpaidAccountNotice.test(notice) ||
     qaSubject.test(subject) || (noChargeTrial.test(head) && !confirmedAmountPaid.test(head));
 }
 

@@ -126,6 +126,30 @@ test('the observed DataCredito abandoned checkout is ignored while paid or refun
   }
 });
 
+test('Claro video welcome pricing and a no-charge offer are explicitly ignored, preserving completed paid activation', () => {
+  const from = 'no_reply@eng.clarovideo.com';
+  const subject = '¡Bienvenido a Claro video!';
+  const body = 'Te damos la bienvenida a Claro video. Disfruta UNIVERSAL+ y ATRESPLAYER. Para iniciar, haz clic en inicia sesión, ' +
+    'digita tu correo y selecciona olvidaste contraseña. Incluido para clientes Claro hogar y pospago. Disfruta por $0/mes IVA incluido. ' +
+    'Consulta promociones. Disfruta este canal premium $35,900/mes, $8,500/mes y $9,900/mes. Correo informativo. ' +
+    'Suscripción incluida por 12 meses en planes pospago. Asocia un medio de pago a la factura. ' +
+    'Esto no generará cobros durante los primeros 12 meses. Los adicionales tienen costo adicional según tarifa vigente.';
+  for (const text of [body, 'Te damos la bienvenida. Disfruta este canal premium por COP 35.900/mes.',
+    'Suscripción incluida. Esto no generará cobros durante los primeros 12 meses. Tarifa futura COP 35.900/mes.']) {
+    assert.equal(candidate(from, subject, text, gmailBankSenders, true), null);
+    assert.equal(isGmailExplicitNonMovement(subject, text), true);
+    assert.equal(resolveGmailExtraction({ provider: 'other', forwarded: false, subject, body: text }, null,
+      true, undefined, '2026-11-13T19:07:14Z').status, 'ignored');
+  }
+  const paid = 'Te damos la bienvenida. Pagaste COP 35.900 el 13/11/2026 para activar tu canal premium.';
+  const notice = candidate(from, subject, paid, gmailBankSenders, true);
+  assert.ok(notice);
+  assert.equal(isGmailExplicitNonMovement(subject, paid), false);
+  const result = resolveGmailExtraction(notice, null, true);
+  assert.equal(result.status, 'registered');
+  assert.deepEqual([result.movement?.amountMinor, result.movement?.direction], ['3590000', 'expense']);
+});
+
 test('Nequi outgoing Bre-B registers bare amounts and Spanish dates without requiring a purpose', () => {
   for (const [amount, clock, expectedTime] of [['80.000', 'a la 1:12 a.m.', '01:12'], ['440.000', 'a las 4:13 a.m.', '04:13']]) {
     const notice = candidate('notificaciones@nequi.com.co', '¡Enviaste plata por Bre-B!',
