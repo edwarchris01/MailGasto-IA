@@ -88,7 +88,8 @@ async function loadMovements() {
     const detail = element('button', 'Ver movimiento');
     action(detail, 'click', async () => {
       const value = await api('movements/' + row.id);
-      $('movement-detail').replaceChildren(element('p', [direction, money(value.amount_minor, value.currency),
+      const currentDirection = value.direction === 'income' ? 'Ingreso' : 'Gasto';
+      $('movement-detail').replaceChildren(element('p', [currentDirection, money(value.amount_minor, value.currency),
         value.transaction_date, value.description, categoryNames[value.category], sources[value.source]].filter(Boolean).join(' · ')));
       if (value.date_source === 'received_at' && value.received_at) {
         const receipt = new Intl.DateTimeFormat('es-CO', {
