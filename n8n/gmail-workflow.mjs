@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import ts from 'typescript';
 import { gmailClassifierPrompt } from '../src/gmail-prompt.ts';
+import { gmailChainModelFormat } from './gmail-model-format.mjs';
 import { categories, gmailModelSchema, gmailRuleExcerptLimit, paymentMethods, providers } from '../src/mail-rules.ts';
 
 const messagePattern = /^[A-Za-z0-9_-]{1,200}$/;
@@ -42,10 +43,12 @@ export function buildGmailWorkflow({
   senderJson = process.env.BANK_SENDERS_JSON, stage = process.env.MAILGASTO_STAGE === '1',
   resultUrl = process.env.MAILGASTO_RESULTS_URL || 'http://mailgasto-api:3105/v1/internal/gmail/results',
   classifier = process.env.MAILGASTO_GMAIL_CLASSIFIER || 'chain', legacyEnabled = false,
+  source = 'oauth',
 } = {}) {
   if (!['agent', 'chain'].includes(classifier)) throw Error('Unknown Gmail classifier: ' + classifier);
   const usesTool = classifier === 'agent';
-  const prompt = gmailClassifierPrompt(categories, paymentMethods, usesTool ? ruleToolName : undefined);
+  const modelFormat = gmailChainModelFormat({ source, classifier, legacyEnabled });
+  const prompt = modelFormat?.prompt ?? gmailClassifierPrompt(categories, paymentMethods, usesTool ? ruleToolName : undefined);
   const senderMap = sendersFrom(senderJson);
   const table = { __rl: true, mode: tableId ? 'id' : 'name', value: tableId || legacyTableName };
   const node = (type, typeVersion, name, position, parameters, config = {}) => ({ type, typeVersion, name, position, parameters, ...config });
@@ -232,7 +235,8 @@ const { provider, excerpt } = query ?? {};
 return JSON.stringify(checkGmailExcerpt(provider, excerpt));
 `,
   }) : node('@n8n/n8n-nodes-langchain.outputParserStructured', 1.3, 'Analizar salida estructurada', [2490, 135], {
-    schemaType: 'manual', inputSchema: JSON.stringify(gmailModelSchema),
+    schemaType: 'manual', inputSchema: JSON.stringify(modelFormat?.schema ?? gmailModelSchema),
+    ...(modelFormat ? { autoFix: false } : {}),
   });
   const result = code('Preparar resultado para NestJS', [2640, -80], asItem + rules + String.raw`
 const validModel = raw => {
