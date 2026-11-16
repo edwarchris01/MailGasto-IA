@@ -486,7 +486,19 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       }
       assert(repeated.every(row => row.message_id === 'direct' || Object.hasOwn(historical, row.message_id)));
       // Complete metadata needs no second read, and the synthetic current message may be beyond this snapshot.
-      for (const _ of repeated) assert.equal(await gmail.dispatchOne(), true);
+      for (const _ of repeated) {
+        // The production worker polls. Allow brief clock/scheduling jitter without advancing retries.
+        const deadline = performance.now() + 1000;
+        let dispatched = await gmail.dispatchOne();
+        while (!dispatched && performance.now() < deadline) {
+          await delay(25);
+          dispatched = await gmail.dispatchOne();
+        }
+        assert.equal(dispatched, true, dispatched ? undefined : JSON.stringify((await db.query(
+          'SELECT message_id,attempts,outcome,due_at,completed_at,webhook_accepted_at FROM gmail_deliveries WHERE mailbox_id=$1',
+          [linked],
+        )).rows));
+      }
       assert.equal(await gmail.dispatchOne(), false);
       assert.equal(deliveries.length, repeatedWebhooksBefore + 1);
       assert.equal((await (await post(filterAndResolve(oauthInput(deliveries.at(-1)!), uncertainModel))).json()).outcome, 'stored');
