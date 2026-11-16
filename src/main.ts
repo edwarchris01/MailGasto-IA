@@ -17,6 +17,7 @@ import { Finance } from './finance.js';
 import { GoogleSignin } from './google-signin.js';
 import { History } from './history.js';
 import { Worker } from './worker.js';
+import { Sms } from './sms.js';
 
 @Module({})
 class App {}
@@ -26,7 +27,7 @@ export async function createApp(config: Config, startWorker = true) {
     module: App,
     controllers: [Api],
     providers: [
-      { provide: CONFIG, useValue: config }, Database, Accounts, Agent, Gmail, GmailExtraction, GmailResults, History, Finance, GoogleSignin,
+      { provide: CONFIG, useValue: config }, Database, Accounts, Agent, Gmail, GmailExtraction, GmailResults, History, Finance, GoogleSignin, Sms,
       ...(startWorker ? [Worker] : []),
     ],
   }, { bodyParser: false, logger: ['error', 'warn'] });

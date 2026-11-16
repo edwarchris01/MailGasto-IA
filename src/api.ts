@@ -12,6 +12,7 @@ import { analyticsInput, correctionInput, correctionsQuery, emailDetailsInput, F
 import { GoogleSignin } from './google-signin.js';
 import { gmailResult, GmailResults } from './gmail-results.js';
 import { chatInput, filtersSchema, History, historySchema } from './history.js';
+import { Sms, smsDeviceInput, smsImportInput } from './sms.js';
 
 const googleCallbackInput = z.object({
   code: z.string().min(1).max(4096).optional(), state: tokenInput.shape.token,
@@ -26,6 +27,7 @@ export class Api {
     @Inject(GmailResults) private readonly gmailResults: GmailResults,
     @Inject(Finance) private readonly finance: Finance,
     @Inject(GoogleSignin) private readonly google: GoogleSignin,
+    @Inject(Sms) private readonly sms: Sms,
   ) {}
 
   @Get('health')
@@ -169,6 +171,31 @@ export class Api {
   @Get('mailboxes')
   async listMailboxes(@Req() req: Request) {
     return this.gmail.list((await this.accounts.current(req)).id);
+  }
+
+  @Get('sms/devices')
+  async smsDevices(@Req() req: Request) {
+    return this.sms.list((await this.accounts.current(req)).id);
+  }
+
+  @Post('sms/devices')
+  @HttpCode(200)
+  async configureSms(@Req() req: Request, @Body() body: unknown) {
+    const owner = await this.accounts.current(req);
+    await this.accounts.throttle('sms-configure:' + owner.id,30,600);
+    return this.sms.configure(owner.id,sessionHash(req),input(smsDeviceInput,body));
+  }
+
+  @Delete('sms/devices/:id')
+  @HttpCode(204)
+  async revokeSms(@Req() req: Request, @Param('id') id: string) {
+    await this.sms.revoke((await this.accounts.current(req)).id,input(uuid,id));
+  }
+
+  @Post('sms/import')
+  @HttpCode(200)
+  async importSms(@Headers('authorization') authorization: string | undefined, @Body() body: unknown) {
+    return this.sms.import(authorization,input(smsImportInput,body));
   }
 
   @Post('mailboxes/:id/reprocess')

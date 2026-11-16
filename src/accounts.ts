@@ -143,6 +143,7 @@ export class Accounts {
       await client.query('UPDATE accounts SET password_hash=$2 WHERE id=$1', [account, replacement]);
       await client.query("DELETE FROM account_tokens WHERE account_id=$1 AND purpose='reset'", [account]);
       await client.query('DELETE FROM sessions WHERE account_id=$1 AND token_hash<>$2', [account, session]);
+      await client.query('UPDATE sms_devices SET enabled=false WHERE account_id=$1 AND issuer_session_hash<>$2', [account,session]);
     });
   }
 
@@ -180,6 +181,7 @@ export class Accounts {
       if (!used?.rowCount) throw new UnprocessableEntityException('El enlace de recuperación expiró o ya fue usado.');
       await client.query('UPDATE accounts SET password_hash=$2 WHERE id=$1', [account.id, replacement]);
       await client.query('DELETE FROM sessions WHERE account_id=$1', [account.id]);
+      await client.query('UPDATE sms_devices SET enabled=false WHERE account_id=$1', [account.id]);
     });
   }
 
@@ -194,7 +196,11 @@ export class Accounts {
   }
 
   async logout(req: Request, response: Response) {
-    await this.db.query('DELETE FROM sessions WHERE token_hash=$1', [sessionHash(req)]);
+    await this.db.transaction(async client => {
+      const session = sessionHash(req);
+      await client.query('DELETE FROM sessions WHERE token_hash=$1', [session]);
+      await client.query('UPDATE sms_devices SET enabled=false WHERE issuer_session_hash=$1', [session]);
+    });
     const { maxAge, ...cookie } = this.cookie();
     response.clearCookie('mailgasto_session', cookie);
   }

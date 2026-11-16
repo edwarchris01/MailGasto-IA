@@ -16,7 +16,7 @@ export const financeFilters = z.object({
 });
 export const movementFilters = financeFilters.extend({
   direction: direction.optional(),
-  source: z.enum(['email', 'manual']).optional(),
+  source: z.enum(['email', 'manual', 'sms']).optional(),
   page: z.coerce.number().int().min(1).max(10_000).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(25),
 });
@@ -86,8 +86,12 @@ async function lockEmailMovement(client: PoolClient, account: string, id: string
     'JOIN notices n ON n.id=t.notice_id JOIN mailboxes m ON m.id=n.mailbox_id ' +
     "WHERE m.account_id=$1 AND t.id=$2 AND n.status='registered' FOR UPDATE OF t", [account, id],
   );
-  if (!original) throw new NotFoundException('Movimiento de correo no encontrado.');
-  return original;
+  if (original) return { ...original, source: 'email' as const };
+  const { rows: [sms] } = await client.query<EmailOriginal>(
+    'SELECT amount_minor::text,transaction_date::text,category,direction FROM sms_movements WHERE account_id=$1 AND id=$2 FOR UPDATE',
+    [account,id]);
+  if (!sms) throw new NotFoundException('Movimiento importado no encontrado.');
+  return { ...sms, source: 'sms' as const };
 }
 
 @Injectable()
@@ -108,10 +112,12 @@ export class Finance {
   async detail(account: string, id: string) {
     const { rows: [movement] } = await this.db.query<Movement>(
       'SELECT ' + fields + ',m.note,m.original_amount_minor::text,m.original_transaction_date::text,m.correction_revision,' +
-      'n.reported_transaction_date::text,n.transaction_time,n.reported_institution,' +
+      "COALESCE(n.reported_transaction_date::text,CASE WHEN s.date_source='reported' THEN s.transaction_date::text END) AS reported_transaction_date," +
+      "COALESCE(n.transaction_time,s.transaction_time) AS transaction_time,COALESCE(n.reported_institution,CASE WHEN s.id IS NOT NULL THEN 'Nequi' END) AS reported_institution," +
       "CASE WHEN lower(m.payment_method)='tarjeta' THEN n.card_type END AS card_type," +
       "CASE WHEN lower(m.payment_method)='tarjeta' THEN n.card_last4 END AS card_last4 " +
-      'FROM confirmed_movements m LEFT JOIN notices n ON n.id=m.notice_id WHERE m.account_id=$1 AND m.id=$2', [account, id],
+      'FROM confirmed_movements m LEFT JOIN notices n ON n.id=m.notice_id LEFT JOIN sms_movements s ON s.id=m.id ' +
+      'WHERE m.account_id=$1 AND m.id=$2', [account, id],
     );
     if (!movement) throw new NotFoundException('Movimiento no encontrado.');
     const { rows: matches } = await this.db.query(
@@ -120,7 +126,7 @@ export class Finance {
       [account, movement.source, movement.amount_minor, movement.currency, movement.transaction_date, movement.direction],
     );
     const { note, original_amount_minor, original_transaction_date, correction_revision, ...details } = movement;
-    return movement.source === 'email'
+    return movement.source === 'email' || movement.source === 'sms'
       ? { ...details, note, original_amount_minor, original_transaction_date, correction_revision, matches }
       : { ...details, matches };
   }
@@ -128,14 +134,15 @@ export class Finance {
   async editEmailDetails(account: string, id: string, data: z.infer<typeof emailDetailsInput>) {
     await this.db.transaction(async client => {
       const original = await lockEmailMovement(client, account, id);
+      const adjustments = original.source === 'sms' ? 'sms_movement_adjustments' : 'email_movement_adjustments';
       if (data.category !== undefined && (original.direction === 'income') !== (data.category === 'ingresos')) {
         throw new BadRequestException('Selecciona una categoría válida para este movimiento.');
       }
       await client.query(
-        'INSERT INTO email_movement_adjustments (movement_id,category,note) VALUES ($1,$2,$3) ' +
+        'INSERT INTO ' + adjustments + ' (movement_id,category,note) VALUES ($1,$2,$3) ' +
         'ON CONFLICT (movement_id) DO UPDATE SET ' +
-        'category=CASE WHEN $4 THEN excluded.category ELSE email_movement_adjustments.category END,' +
-        'note=CASE WHEN $5 THEN excluded.note ELSE email_movement_adjustments.note END',
+        'category=CASE WHEN $4 THEN excluded.category ELSE ' + adjustments + '.category END,' +
+        'note=CASE WHEN $5 THEN excluded.note ELSE ' + adjustments + '.note END',
         [id, data.category === original.category ? null : data.category ?? null, data.note ?? null,
           data.category !== undefined, data.note !== undefined],
       );
@@ -148,8 +155,10 @@ export class Finance {
     }
     await this.db.transaction(async client => {
       const original = await lockEmailMovement(client, account, id);
+      const adjustments = original.source === 'sms' ? 'sms_movement_adjustments' : 'email_movement_adjustments';
+      const corrections = original.source === 'sms' ? 'sms_movement_corrections' : 'email_movement_corrections';
       const { rows: [adjustment] } = await client.query<EmailAdjustment>(
-        'SELECT amount_minor::text,transaction_date::text,revision FROM email_movement_adjustments WHERE movement_id=$1', [id],
+        'SELECT amount_minor::text,transaction_date::text,revision FROM ' + adjustments + ' WHERE movement_id=$1', [id],
       );
       const amount = adjustment?.amount_minor ?? original.amount_minor;
       const date = adjustment?.transaction_date ?? original.transaction_date;
@@ -162,14 +171,14 @@ export class Finance {
         throw new ConflictException('El movimiento cambió en otra sesión. Recarga los datos para continuar.');
       }
       await client.query(
-        'INSERT INTO email_movement_adjustments (movement_id,amount_minor,transaction_date,revision) VALUES ($1,$2,$3,$4) ' +
+        'INSERT INTO ' + adjustments + ' (movement_id,amount_minor,transaction_date,revision) VALUES ($1,$2,$3,$4) ' +
         'ON CONFLICT (movement_id) DO UPDATE SET ' +
         '(amount_minor,transaction_date,revision)=(excluded.amount_minor,excluded.transaction_date,excluded.revision)',
         [id, nextAmount === original.amount_minor ? null : nextAmount,
           nextDate === original.transaction_date ? null : nextDate, revision + 1],
       );
       await client.query(
-        'INSERT INTO email_movement_corrections ' +
+        'INSERT INTO ' + corrections + ' ' +
         '(movement_id,revision,previous_amount_minor,amount_minor,previous_transaction_date,transaction_date) ' +
         'VALUES ($1,$2,$3,$4,$5,$6)', [id, revision + 1, amount, nextAmount, date, nextDate],
       );
@@ -177,11 +186,15 @@ export class Finance {
   }
 
   async emailCorrections(account: string, id: string, beforeRevision?: number) {
+    const { rows: [movement] } = await this.db.query<{source:string}>(
+      "SELECT source FROM confirmed_movements WHERE account_id=$1 AND id=$2 AND source IN ('email','sms')",[account,id]);
+    if (!movement) throw new NotFoundException('Movimiento importado no encontrado.');
+    const corrections = movement.source === 'sms' ? 'sms_movement_corrections' : 'email_movement_corrections';
     const { rows } = await this.db.query<{ revision: number | null }>(
       'SELECT c.revision,c.corrected_at,c.previous_amount_minor::text,c.amount_minor::text,' +
       'c.previous_transaction_date::text,c.transaction_date::text FROM confirmed_movements m ' +
-      'LEFT JOIN email_movement_corrections c ON c.movement_id=m.id AND ($3::int IS NULL OR c.revision<$3) ' +
-      "WHERE m.account_id=$1 AND m.id=$2 AND m.source='email' ORDER BY c.revision DESC LIMIT $4",
+      'LEFT JOIN ' + corrections + ' c ON c.movement_id=m.id AND ($3::int IS NULL OR c.revision<$3) ' +
+      "WHERE m.account_id=$1 AND m.id=$2 AND m.source IN ('email','sms') ORDER BY c.revision DESC LIMIT $4",
       [account, id, beforeRevision ?? null, correctionPageSize + 1],
     );
     if (!rows.length) throw new NotFoundException('Movimiento de correo no encontrado.');

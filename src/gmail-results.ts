@@ -295,6 +295,20 @@ export class GmailResults {
       }
       if (fingerprints.length && (result.status === 'registered' || result.status === 'pending' && result.avalCopy)) {
         const value = result.status === 'registered' ? result.movement : result.evidence;
+        const { rows: smsMatches } = await client.query<ReferencedMovement & { date_source: string }>(
+          'SELECT DISTINCT s.id,s.amount_minor::text,s.currency,s.transaction_date::text,s.direction,s.date_source ' +
+          'FROM sms_operation_references r JOIN sms_movements s ON s.id=r.movement_id ' +
+          'WHERE s.account_id=$1 AND r.fingerprint=ANY($2::text[]) LIMIT 2', [mailbox.account_id,fingerprints]);
+        const smsMatch = smsMatches[0];
+        if (smsMatch && smsMatches.length === 1 && value && smsMatch.amount_minor === value.amountMinor &&
+            smsMatch.currency === value.currency && smsMatch.direction === value.direction &&
+            (smsMatch.transaction_date === value.date || smsMatch.date_source === 'received_at' || value.dateSource === 'received_at')) {
+          await discardUnregisteredNotices(client,'AND n.mailbox_id=$2 AND n.message_id=$3',
+            ['verified_duplicate',mailbox.id,result.messageId]);
+          if (oauth) await finishGmailDelivery(client,result.deliveryId!,result.attemptId!,'skipped');
+          return { outcome:'duplicate' };
+        }
+        if (smsMatch && result.status === 'registered') result = duplicateForReview(result);
         const { rows: matches } = await client.query<ReferencedMovement>(
           'SELECT DISTINCT n.id,t.amount_minor::text,t.currency,t.transaction_date::text,t.direction ' +
           'FROM gmail_operation_references s JOIN notices n ON n.id=s.notice_id JOIN mailboxes m ON m.id=n.mailbox_id ' +
@@ -326,7 +340,7 @@ export class GmailResults {
           const value = result.movement;
           const matched = await client.query(
             'SELECT 1 FROM confirmed_movements m LEFT JOIN notices n ON n.id=m.notice_id ' +
-            'WHERE m.account_id=$1 AND m.currency=$2 AND m.direction=$3 ' +
+            "WHERE m.account_id=$1 AND m.source<>'sms' AND m.currency=$2 AND m.direction=$3 " +
             'AND ((m.amount_minor=$4 AND m.transaction_date=$5) OR ' +
             '(m.original_amount_minor=$4 AND m.original_transaction_date=$5)) ' +
             'AND NOT EXISTS (SELECT 1 FROM notices own WHERE own.id=m.notice_id AND own.mailbox_id=$6 AND own.message_id=$7) ' +
