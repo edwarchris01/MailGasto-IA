@@ -5,7 +5,7 @@ import java.text.Normalizer
 import java.util.Locale
 
 object SmsCandidateFilter {
-    const val VERSION = 2
+    const val VERSION = 3
     fun normalize(value: String): String = Normalizer.normalize(value, Normalizer.Form.NFD)
         .replace(Regex("\\p{M}+"), "").lowercase(Locale.ROOT)
 
@@ -15,11 +15,11 @@ object SmsCandidateFilter {
             "\\bno (pudimos|pudo|se pudo|fue posible|se realizo)\\b|\\bpuedes (pagar|comprar|enviar)\\b"
     )
     private val settled = Regex(
-        "\\b(recibiste|pagaste|compraste|enviaste|transferiste|retiraste|sacaste|realizaste|has recibido)\\b|" +
+        "\\b(recibiste|pagaste|compraste|enviaste|transferiste|retiraste|sacaste|realizaste|reversamos|has recibido)\\b|" +
             "\\bte (llego|llegaron|envio|enviaron|mando|mandaron|transfirieron|abonaron|acreditaron|reembolsaron|devolvieron)\\b|" +
             "\\b(transferencia|pago|compra|retiro|reembolso) (exitosa?|realizad[oa]|aprobad[oa]|acreditad[oa]|aplicad[oa])\\b"
     )
-    private val amount = Regex("(?:\\$\\s*|\\bcop\\s*|\\b(?:recibiste|pagaste|compraste|enviaste|transferiste|retiraste|sacaste|has recibido)\\s+(?:de manera exitosa\\s+)?)[0-9][0-9.,]*")
+    private val amount = Regex("(?:\\$\\s*|\\bcop\\s*|\\b(?:recibiste|pagaste|compraste|enviaste|transferiste|retiraste|sacaste|reversamos|has recibido)\\s+(?:de manera exitosa\\s+)?)[0-9][0-9.,]*")
 
     fun accepts(sender: String, body: String): Boolean {
         if (body.isBlank() || body.length > 5000) return false
@@ -36,10 +36,10 @@ object SmsCandidateFilter {
         if (negatedMoneyFlow.containsMatchIn(principal)) return false
         val firstMovement = settled.find(principal)?.range?.first ?: return false
         if (Regex("\\b(?:si|cuando|en caso|quizas?|tal vez|podria|habria)\\b").containsMatchIn(principal.substring(0, firstMovement))) return false
-        val refund = Regex("\\b(?:te (?:reembolsaron|devolvieron)|reembolso (?:acreditado|aplicado|realizado))\\b").find(principal)
-            ?.takeUnless { Regex("\\bno\\s*$").containsMatchIn(principal.substring(0, it.range.first)) }
+        val refund = Regex("\\b(?:reversamos|te (?:reembolsaron|devolvieron)|reembolso (?:acreditado|aplicado|realizado))\\b").find(principal)
+            ?.takeUnless { Regex("\\b(?:no|nunca)\\s*$").containsMatchIn(principal.substring(0, it.range.first)) }
         val operation = refund?.let { principal.substring(it.range.first) } ?: principal
-        val negated = Regex("\\bno (?:has recibido|te (?:llego|envio|reembolsaron|devolvieron|transfirieron|abonaron|acreditaron)|(?:se )?(?:recib\\w*|envi\\w*|pag\\w*|realiz\\w*|transfer\\w*|apro\\w*|complet\\w*|confirm\\w*|retir\\w*))")
+        val negated = Regex("\\b(?:no|nunca) (?:has recibido|te (?:llego|envio|reembolsaron|devolvieron|transfirieron|abonaron|acreditaron)|(?:se )?(?:recib\\w*|envi\\w*|pag\\w*|realiz\\w*|transfer\\w*|apro\\w*|complet\\w*|confirm\\w*|retir\\w*|revers\\w*))")
         val hasAmount = amount.findAll(operation).any {
             val value = it.value
             value.any { char -> char in '1'..'9' } &&
