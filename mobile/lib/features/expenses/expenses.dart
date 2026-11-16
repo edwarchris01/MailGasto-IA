@@ -61,6 +61,8 @@ class ExpenseRepository {
 class ReportedMovement {
   ReportedMovement.fromJson(Json row)
     : date = row['reported_transaction_date'] as String?,
+      dateSource = row['date_source'] as String?,
+      receivedAt = row['received_at'] as String?,
       time = row['transaction_time'] as String?,
       paymentMethod = row['reported_payment_method'] as String?,
       cardType = row['card_type'] as String?,
@@ -72,14 +74,26 @@ class ReportedMovement {
       };
 
   final String? date, time, paymentMethod, cardType, cardLast4, institution;
+  final String? dateSource, receivedAt;
+
+  bool get dateFromReceipt => dateSource == 'received_at' && receivedAt != null;
+
+  bool usesReceiptDate(String? effectiveDate) =>
+      dateFromReceipt &&
+      effectiveDate != null &&
+      shortDay(effectiveDate) == receivedDay(receivedAt!, year: true);
 
   String dateLabel(String effectiveDate) {
+    if (usesReceiptDate(effectiveDate)) return syncLabel(receivedAt!);
     final clock = time;
     final day = shortDay(effectiveDate);
     return clock != null && effectiveDate == date ? '$day · $clock' : day;
   }
 
   (String, String)? separateTime(String? effectiveDate) {
+    // A reception time must never be presented as the operation time,
+    // including after the user corrects the movement date.
+    if (dateFromReceipt) return null;
     final clock = time;
     final reportedDate = date;
     if (clock == null) return null;

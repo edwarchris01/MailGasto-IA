@@ -230,13 +230,26 @@ class _EmailMovementCorrectionFormState
                 ),
         ),
         const SizedBox(height: 12),
+        if (item.reported.dateFromReceipt) ...[
+          const AppNotice(
+            icon: Icons.schedule_outlined,
+            title: 'Fecha original tomada del correo',
+            description:
+                'El aviso no indicó la fecha de la operación. Se usó su recepción; puedes seleccionar la fecha real de la operación.',
+          ),
+          const SizedBox(height: 12),
+        ],
         MovementDateField(
           date: _date,
           onChanged: _busy ? null : (value) => setState(() => _date = value),
         ),
         _OriginalValue(
-          label: 'Fecha original',
-          value: shortDay(details.originalDate),
+          label: item.reported.dateFromReceipt
+              ? 'Fecha original (recepción)'
+              : 'Fecha original',
+          value: item.reported.dateFromReceipt
+              ? syncLabel(item.reported.receivedAt!)
+              : shortDay(details.originalDate),
           onRestore: _busy || _date == details.originalDate
               ? null
               : () => setState(() => _date = details.originalDate),

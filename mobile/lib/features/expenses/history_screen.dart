@@ -207,7 +207,11 @@ class _NoticeScreenState extends ConsumerState<NoticeScreen> {
           if (notice.direction case 'income' || 'expense')
             ('Tipo', notice.direction == 'income' ? 'Ingreso' : 'Gasto'),
           (
-            pending && date != null ? 'Fecha indicada' : 'Fecha',
+            notice.reported.usesReceiptDate(date)
+                ? 'Fecha estimada (recepción)'
+                : pending && date != null
+                ? 'Fecha indicada'
+                : 'Fecha',
             date == null ? 'Por confirmar' : notice.reported.dateLabel(date),
           ),
           ?notice.reported.separateTime(date),

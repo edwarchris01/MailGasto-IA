@@ -668,7 +668,12 @@ class _MovementDetailState extends ConsumerState<_MovementDetail> {
           ),
           const SizedBox(height: 10),
           DetailFields([
-            ('Fecha', item.reported.dateLabel(item.date)),
+            (
+              item.reported.usesReceiptDate(item.date)
+                  ? 'Fecha estimada (recepción)'
+                  : 'Fecha',
+              item.reported.dateLabel(item.date),
+            ),
             ?(timeOnOriginalDate
                 ? null
                 : item.reported.separateTime(item.date)),
@@ -691,6 +696,20 @@ class _MovementDetailState extends ConsumerState<_MovementDetail> {
               ),
             ],
           ]),
+          if (item.reported.dateFromReceipt) ...[
+            const SizedBox(height: 10),
+            AppNotice(
+              icon: Icons.schedule_outlined,
+              title: 'Fecha tomada del correo',
+              description: item.reported.usesReceiptDate(item.date)
+                  ? 'El aviso no indicó la fecha de la operación. Se usó la fecha y hora de recepción del correo. Puedes ajustar la fecha en Corregir datos.'
+                  : 'La fecha original se tomó de la recepción del correo. La fecha del movimiento fue corregida.',
+            ),
+            if (!item.reported.usesReceiptDate(item.date))
+              DetailFields([
+                ('Recepción del correo', syncLabel(item.reported.receivedAt!)),
+              ]),
+          ],
           if (item.manual) ...[
             const SizedBox(height: 12),
             FormPair(
