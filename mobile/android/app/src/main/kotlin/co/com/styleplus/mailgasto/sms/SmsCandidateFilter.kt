@@ -5,7 +5,7 @@ import java.text.Normalizer
 import java.util.Locale
 
 object SmsCandidateFilter {
-    const val VERSION = 1
+    const val VERSION = 2
     fun normalize(value: String): String = Normalizer.normalize(value, Normalizer.Form.NFD)
         .replace(Regex("\\p{M}+"), "").lowercase(Locale.ROOT)
 
@@ -32,6 +32,8 @@ object SmsCandidateFilter {
             Regex("\\b(?:enviaste|transferiste|pagaste|compraste|retiraste)\\b(?:[^.!?\\n;]|\\.(?=\\d)){0,220}\\bdesde tu nequi\\b").containsMatchIn(normalized)
         if (!nequi) return false
         val principal = normalized.split(Regex("(?:[.!?]\\s+|\\n)(?:si|en caso de que)\\s+"), limit = 2).first()
+        val negatedMoneyFlow = Regex("\\bno (?:se )?te (?:enviaron|transfirieron|abonaron|acreditaron|consignaron|reembolsaron|devolvieron|debitaron|cobraron|descontaron)\\b")
+        if (negatedMoneyFlow.containsMatchIn(principal)) return false
         val firstMovement = settled.find(principal)?.range?.first ?: return false
         if (Regex("\\b(?:si|cuando|en caso|quizas?|tal vez|podria|habria)\\b").containsMatchIn(principal.substring(0, firstMovement))) return false
         val refund = Regex("\\b(?:te (?:reembolsaron|devolvieron)|reembolso (?:acreditado|aplicado|realizado))\\b").find(principal)

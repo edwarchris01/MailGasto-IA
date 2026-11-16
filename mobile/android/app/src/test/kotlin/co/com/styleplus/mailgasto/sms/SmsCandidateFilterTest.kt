@@ -51,6 +51,8 @@ class SmsCandidateFilterTest {
             "Nequi" to "No has recibido COP 80.000.",
             "Nequi" to "No te llegó COP 80.000.",
             "Nequi" to "No te reembolsaron COP 80.000.",
+            "Nequi" to "No te enviaron COP 50.000.",
+            "Nequi" to "No se te enviaron COP 50.000.",
             "Nequi" to "Si Ana te envió $50.000, revisa movimientos.",
             "Nequi" to "Tal vez Ana te envió $50.000.",
             "Nequi" to "Recibiste COP 0,00.",
