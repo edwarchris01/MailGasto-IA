@@ -24,7 +24,7 @@ type Saved = { id: string; status: 'registered' | 'duplicate' | 'ignored' | 'pen
   movement_id: string | null; classifier_version: string; policy_hash: string };
 type Match = { id: string; amount_minor: string; currency: string; transaction_date: string; direction: string; date_source: string | null };
 const since = '2026-11-01';
-export const smsClassifierVersion = '2026-11-16.1';
+export const smsClassifierVersion = '2026-11-16.2';
 
 @Injectable()
 export class Sms {

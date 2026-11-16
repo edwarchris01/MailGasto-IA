@@ -161,6 +161,42 @@ test('SMS imports remain scoped, private, idempotent, editable and distinct from
     const original=await (await request('movements/'+movementId)).json();assert.equal(original.amount_minor,'29900000');assert.equal(original.correction_revision,1);
   });
 
+  await t.test('SMS classifier v2 recovers a prior unconfirmed reversal without changing its purchases or other movements',async()=>{
+    const purchases=[
+      item('NEQUI: Pagaste 300,00 en COMERCIO SINTETICO con tu Tarjeta','2026-11-04T08:20:36.834Z'),
+      item('NEQUI: Pagaste 30.000,00 en COMERCIO SINTETICO con tu Tarjeta','2026-11-04T08:21:36.834Z'),
+    ];
+    const paid=await ingest(purchases);
+    assert.deepEqual(paid.map((row:{status:string})=>row.status),['registered','registered']);
+    const previous=(await db.query('SELECT id,source,amount_minor::text,currency,transaction_date::text,direction,' +
+      'original_amount_minor::text,original_transaction_date::text,correction_revision,note FROM confirmed_movements ORDER BY id')).rows;
+    const legacyDeviceId=randomUUID();
+    const disabled=await (await request('sms/devices','POST',{deviceId:legacyDeviceId,autoDetect:false})).json();
+    // Anonymized observed reversal. Seed its previously unconfirmed outcome without storing the SMS body.
+    const reversal=item('NEQUI: Reversamos 300,00 de tu compra en COMERCIO SINTETICO a tu Tarjeta','2026-11-04T08:22:36.834Z');
+    assert.equal((await ingest([reversal],disabled.ingestToken))[0].status,'ignored');
+    const enabled=await configure(legacyDeviceId);
+    const {rows:[prior]}=await db.query("UPDATE sms_events SET classifier_version='2026-11-16.1',policy_hash=$2," +
+      "status='pending',reason='missing_or_ambiguous_fields' WHERE device_id=$1 RETURNING id",[enabled.id,hash(JSON.stringify([true,[]]))]);
+    const [recovered]=await ingest([reversal],enabled.ingestToken);
+    assert.equal(recovered.status,'registered');
+    const detail=await (await request('movements/'+recovered.movementId)).json();
+    assert.deepEqual([detail.source,detail.amount_minor,detail.currency,detail.direction,detail.category,
+      detail.transaction_date,detail.transaction_time,detail.date_source,detail.received_at],
+    ['sms','30000','COP','income','ingresos','2026-11-04','03:22:36','received_at','2026-11-04T08:22:36.834Z']);
+    assert.deepEqual((await db.query('SELECT id,status,classifier_version,movement_id FROM sms_events WHERE device_id=$1',[enabled.id])).rows,
+      [{id:prior.id,status:'registered',classifier_version:'2026-11-16.2',movement_id:recovered.movementId}]);
+    assert.equal((await ingest([{...reversal,externalId:'retry-on-another-device'}]))[0].movementId,recovered.movementId);
+    await db.query("UPDATE sms_events SET classifier_version='2026-11-16.1' WHERE movement_id=ANY($1::uuid[])",
+      [paid.map((row:{movementId:string})=>row.movementId)]);
+    assert.deepEqual((await ingest(purchases)).map((row:{status:string})=>row.status),['duplicate','duplicate']);
+    const after=(await db.query('SELECT id,source,amount_minor::text,currency,transaction_date::text,direction,' +
+      'original_amount_minor::text,original_transaction_date::text,correction_revision,note FROM confirmed_movements WHERE id=ANY($1::uuid[]) ORDER BY id',
+    [previous.map(row=>row.id)])).rows;
+    assert.deepEqual(after,previous,'Existing purchases, corrections and all financial values remain unchanged');
+    assert.equal((await db.query('SELECT count(*)::int AS count FROM sms_movements WHERE event_id=$1',[prior.id])).rows[0].count,1);
+  });
+
   await t.test('token survives passive session expiration, rotates on reconfiguration and revokes on logout',async()=>{
     await db.query("UPDATE sessions SET expires_at=now()-interval '1 second' WHERE token_hash=$1",[hash(owner.secret)]);
     assert.equal((await ingest([incoming]))[0].status,'duplicate');
@@ -171,7 +207,7 @@ test('SMS imports remain scoped, private, idempotent, editable and distinct from
     assert.equal((await ingest([incoming]))[0].status,'duplicate');
     assert.equal((await request('auth/logout','POST')).status,204);
     assert.equal((await request('sms/import','POST',{items:[incoming]},device.ingestToken,true)).status,401);
-    assert.equal((await db.query('SELECT count(*)::int AS count FROM confirmed_movements')).rows[0].count,8);
+    assert.equal((await db.query('SELECT count(*)::int AS count FROM confirmed_movements')).rows[0].count,11);
   });
 
   await t.test('explicit disable and password reset revoke device credentials without deleting movements',async()=>{
