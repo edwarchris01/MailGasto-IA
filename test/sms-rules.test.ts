@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { isNequiSmsCandidate, parseNequiSms } from '../src/sms-rules.js';
 
-// Synthetic templates only. No fixture represents an audited message or imports a real movement.
+// Synthetic templates except the explicitly labeled anonymized reversal format below.
+// Tests never import a real movement or retain personal sender/account identifiers.
 const sender = 'NEQUI-SYNTHETIC';
 const receivedAt = '2026-11-16T03:20:12.000Z';
 const parse = (body: string, timestamp = receivedAt) => parseNequiSms({ sender, body, receivedAt: timestamp });
@@ -153,6 +154,43 @@ test('SMS canceled, rejected and pending operations never become effective movem
     'Nequi: Pagaste COP 80.000 el 15/11/2026. Si tu pago por COP 80.000 fue rechazado, comunicate con nosotros.',
     'Nequi: Pagaste COP 80.000 el 15/11/2026. Si no te reembolsaron COP 80.000, comunicate con nosotros.',
   ]) assert.equal(parse(body).status, 'registered', body);
+});
+
+test('observed Nequi Reversamos format records the credited return while preserving both purchase amounts', () => {
+  // Observed structure with the merchant anonymized; the receipt timestamp is the operation-date fallback.
+  const timestamp = '2026-11-04T08:22:36.834Z';
+  const body = 'NEQUI: Reversamos 300,00 de tu compra en COMERCIO SINTETICO a tu Tarjeta';
+  assert.equal(isNequiSmsCandidate({ sender, body }), true);
+  const result = parse(body, timestamp);
+  assert.equal(result.status, 'registered');
+  assert.ok(result.status === 'registered');
+  assert.deepEqual([result.movement.amountMinor, result.movement.currency, result.movement.direction,
+    result.movement.category, result.movement.date, result.movement.transactionTime, result.movement.dateSource],
+  ['30000', 'COP', 'income', 'ingresos', '2026-11-04', '03:22:36', 'received_at']);
+  assert.equal('references' in result, false);
+  for (const [amount, minor] of [['300,00', '30000'], ['30.000,00', '3000000']]) {
+    const payment = parse('NEQUI: Pagaste ' + amount + ' en COMERCIO SINTETICO con tu Tarjeta', timestamp);
+    assert.equal(payment.status, 'registered');
+    assert.ok(payment.status === 'registered');
+    assert.deepEqual([payment.movement.amountMinor, payment.movement.currency, payment.movement.direction], [minor, 'COP', 'expense']);
+  }
+});
+
+test('SMS reversal negations, promises, requests and pending states never imply credited money', () => {
+  for (const body of [
+    'NEQUI: No reversamos 300,00 de tu compra a tu Tarjeta.',
+    'NEQUI: Nunca reversamos 300,00 de tu compra a tu Tarjeta.',
+    'NEQUI: Reversaremos 300,00 de tu compra a tu Tarjeta.',
+    'NEQUI: Vamos a reversar 300,00 de tu compra a tu Tarjeta.',
+    'NEQUI: Si reversamos 300,00 de tu compra, te avisaremos.',
+    'NEQUI: Solicitud de reversión de tu compra por COP 300,00.',
+    'NEQUI: Reversión pendiente de tu compra por COP 300,00.',
+    'NEQUI: Reversamos 300,00 de tu compra a tu Tarjeta. Estado: Pendiente.',
+    'NEQUI: Reversamos 300,00 de tu compra a tu Tarjeta. Estado: Rechazado.',
+  ]) {
+    assert.equal(isNequiSmsCandidate({ sender, body }), false, body);
+    assert.equal(parse(body).status, 'ignored', body);
+  }
 });
 
 test('SMS incomplete or conflicting evidence remains unconfirmed without a Gmail pending notice', () => {
