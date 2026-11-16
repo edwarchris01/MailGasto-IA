@@ -16,7 +16,7 @@ const tokenUrl = 'https://oauth2.googleapis.com/token';
 const maxRawSize = 1_500_000;
 const maxReprocessAttempts = 5;
 // Bump when extraction rules change: unresolved notices receive one new review.
-export const gmailClassifierVersion = '2026-11-16.2';
+export const gmailClassifierVersion = '2026-11-16.3';
 const recoverableDeliveryErrors = ['webhook_timeout', 'webhook_unavailable', 'callback_timeout',
   'gmail_processing_failed', 'attempts_exhausted', 'extractor_unavailable', 'ollama_unavailable', 'invalid_model_output'];
 
@@ -472,7 +472,7 @@ export class Gmail {
       await client.query(
         'WITH candidates AS (SELECT ids.message_id, (CASE WHEN $7::boolean THEN ' +
         "CASE WHEN n.status='registered' AND t.id IS NOT NULL THEN " +
-        "n.reason='user_confirmed' OR (n.transaction_time IS NOT NULL AND n.reported_institution IS NOT NULL " +
+        "n.reason='user_confirmed' OR (n.date_source IS NOT NULL AND n.transaction_time IS NOT NULL AND n.reported_institution IS NOT NULL " +
         "AND (t.payment_method IS NOT NULL OR t.direction='income')) OR " +
         '(d.id IS NOT NULL AND (d.completed_at IS NULL OR d.classifier_version IS NOT DISTINCT FROM $6)) ELSE ' +
         "COALESCE(n.status NOT IN ('pending','error'),false) OR t.id IS NOT NULL OR " +
@@ -482,7 +482,7 @@ export class Gmail {
         "(d.outcome='error' AND (d.due_at>now() OR (d.classifier_version IS NOT DISTINCT FROM $6 AND " +
         "(d.recovery_count>=2 OR d.last_error IS NOT NULL AND NOT (split_part(d.last_error,':',1)=ANY($8::text[])))))) END " +
         "ELSE CASE WHEN n.status='registered' AND t.id IS NOT NULL THEN " +
-        "(n.reason='user_confirmed' OR (n.transaction_time IS NOT NULL AND n.reported_institution IS NOT NULL " +
+        "(n.reason='user_confirmed' OR (n.date_source IS NOT NULL AND n.transaction_time IS NOT NULL AND n.reported_institution IS NOT NULL " +
         "AND (t.payment_method IS NOT NULL OR t.direction='income'))) " +
         "ELSE n.status NOT IN ('pending','error') OR t.id IS NOT NULL END END OR d.received_at>=$5) AS skip " +
         'FROM unnest($4::text[]) AS ids(message_id) LEFT JOIN notices n ON n.mailbox_id=$1 AND n.message_id=ids.message_id ' +
@@ -593,9 +593,12 @@ export class Gmail {
           classification.status === 'pending' ? classification.evidence : undefined;
         const alternateEvidence = alternateResult.status === 'registered' ? alternateResult.movement :
           alternateResult.status === 'pending' ? alternateResult.evidence : undefined;
+        const primaryReception = primaryEvidence && 'dateSource' in primaryEvidence && primaryEvidence.dateSource === 'received_at';
+        const alternateReception = alternateEvidence && 'dateSource' in alternateEvidence && alternateEvidence.dateSource === 'received_at';
         const fundamentalFields = ['amountMinor', 'currency', 'date', 'direction'] as const;
         const detailFields = ['paymentMethod', 'transactionTime', 'cardType', 'cardLast4', 'reportedInstitution'] as const;
         if (primaryEvidence && alternateEvidence && fundamentalFields.some(key =>
+          (key !== 'date' || !primaryReception && !alternateReception) &&
           primaryEvidence[key] != null && alternateEvidence[key] != null && primaryEvidence[key] !== alternateEvidence[key])) {
           stage = 'store_mime_conflict';
           if (readable.status !== 'ignored') await this.results.save({ source: 'oauth', ...identity,
@@ -603,10 +606,10 @@ export class Gmail {
             status: 'pending', reason: 'unconfirmed_extraction', confidence: 0 });
           return true;
         }
-        const primaryCore = fundamentalFields.filter(key => primaryEvidence?.[key] != null).length;
-        const alternateCore = fundamentalFields.filter(key => alternateEvidence?.[key] != null).length;
-        const primaryDetails = detailFields.filter(key => primaryEvidence?.[key] != null).length;
-        const alternateDetails = detailFields.filter(key => alternateEvidence?.[key] != null).length;
+        const primaryCore = fundamentalFields.filter(key => (key !== 'date' || !primaryReception) && primaryEvidence?.[key] != null).length;
+        const alternateCore = fundamentalFields.filter(key => (key !== 'date' || !alternateReception) && alternateEvidence?.[key] != null).length;
+        const primaryDetails = detailFields.filter(key => (key !== 'transactionTime' || !primaryReception) && primaryEvidence?.[key] != null).length;
+        const alternateDetails = detailFields.filter(key => (key !== 'transactionTime' || !alternateReception) && alternateEvidence?.[key] != null).length;
         // Purpose-review results can have no unconfirmedFields even when their literal evidence is incomplete.
         // Pick one complete body; never assemble an amount from one MIME part and a date from another.
         const richerPending = classification.status === 'pending' && alternateResult.status === 'pending' &&
@@ -621,9 +624,7 @@ export class Gmail {
         } else if (classification.status === 'registered' && alternateResult.status === 'registered') {
           const plainReferences = classification.references ?? [];
           const htmlReferences = alternateResult.references ?? [];
-          const plainMovement = classification.movement;
-          const htmlMovement = alternateResult.movement;
-          if (detailFields.filter(key => htmlMovement[key] != null).length > detailFields.filter(key => plainMovement[key] != null).length) {
+          if (primaryReception && !alternateReception || primaryReception === alternateReception && alternateDetails > primaryDetails) {
             selected = alternate;
             classification = alternateResult;
           }
@@ -646,8 +647,8 @@ export class Gmail {
           return true;
         }
       }
-      // These outcomes come from a rule that no model can override: untrusted senders,
-      // own transfers, unspecified transfer purpose, credit/refund review, or receipt copies.
+      // These outcomes come from a rule that no model can override: untrusted/forwarded
+      // senders, conflicting evidence, or receipt copies without an independent operation.
       // Persist their evidence immediately instead of making it depend on model availability.
       const localReview = classification.status === 'pending' &&
         (classification.reason === 'unconfirmed_extraction' || 'avalCopy' in classification);

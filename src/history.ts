@@ -19,7 +19,7 @@ type Filters = z.infer<typeof filtersSchema>;
 type ChatFilters = Filters & { kind?: 'income' | 'expense' | 'comparison'; currency?: 'COP' | 'USD' | 'EUR' };
 const noticeCategory = 'coalesce(a.category,t.category)';
 const noticePeriodDate = "coalesce(a.transaction_date,t.transaction_date,(n.received_at AT TIME ZONE 'America/Bogota')::date)";
-const selection = 'n.id,n.provider,n.forwarded,n.received_at,n.status,n.reason,n.confidence,' +
+const selection = 'n.id,n.provider,n.forwarded,n.received_at,n.date_source,n.status,n.reason,n.confidence,' +
   'coalesce(a.amount_minor,t.amount_minor)::text AS amount_minor,t.currency,' +
   'coalesce(a.transaction_date,t.transaction_date)::text AS transaction_date,t.payment_method,t.description,' +
   noticeCategory + ' AS category,t.direction';

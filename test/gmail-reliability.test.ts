@@ -58,7 +58,7 @@ test('Gmail reconciles a bounded month, exposes failures and recovers without re
   const raw = Buffer.from('From: Store <receipts@fixture.example>\r\nSubject: Payment receipt\r\n' +
     'Authentication-Results: mx.google.com; dmarc=pass header.from=fixture.example\r\n' +
     'MIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n' +
-    'Your payment was completed on ' + received.toISODate() + '. Amount paid: USD 49.95. Product: web hosting.').toString('base64url');
+    'Your payment was completed on ' + received.toISODate() + '. Amount missing from preview. Product: web hosting.').toString('base64url');
   let ids = ['missing-receipt'];
   let webhookStatus = 202;
   const posted: Record<string, unknown>[] = [];
@@ -265,7 +265,7 @@ test('Gmail reconciles a bounded month, exposes failures and recovers without re
     await finishScan();
   });
 
-  await t.test('deterministic reviews refresh exact transfer evidence without waiting for an unavailable model', async () => {
+  await t.test('proven cash flow registers without purpose review or an unavailable model', async () => {
     const day = received.setLocale('es').toFormat("d 'de' LLLL 'de' yyyy");
     const bankDay = received.toFormat('dd/MM/yy');
     const nequi = 'notificaciones@nequi.com.co';
@@ -314,39 +314,44 @@ test('Gmail reconciles a bounded month, exposes failures and recovers without re
     await gmail.scanReprocessPage();
     for (const _ of ids) assert.equal(await gmail.dispatchOne(), true);
     assert.equal(await gmail.dispatchOne(), false);
-    assert.equal(posted.length, postedBefore, 'A model cannot override these review guards and must not block their evidence');
+    assert.equal(posted.length, postedBefore, 'Literal cash flow does not depend on a model or an economic purpose');
     for (const item of cases) {
-      const saved = (await db.query('SELECT provider,status,reason,reported_amount_minor::text,reported_currency,' +
-        'reported_transaction_date::text,reported_direction,transaction_time,reported_payment_method FROM notices WHERE message_id=$1', [item.id])).rows[0];
+      const saved = (await db.query('SELECT n.provider,n.status,n.reason,t.amount_minor::text,t.currency,' +
+        't.transaction_date::text,t.direction,n.transaction_time,n.reported_payment_method,n.date_source ' +
+        'FROM notices n JOIN transactions t ON t.notice_id=n.id WHERE n.message_id=$1', [item.id])).rows[0];
       assert.deepEqual(saved, {
-        provider: item.provider, status: 'pending', reason: 'unconfirmed_extraction', reported_amount_minor: item.amount,
-        reported_currency: 'COP', reported_transaction_date: received.toISODate(), reported_direction: item.direction,
-        transaction_time: item.time, reported_payment_method: item.method,
+        provider: item.provider, status: 'registered', reason: null, amount_minor: item.amount,
+        currency: 'COP', transaction_date: received.toISODate(), direction: item.direction,
+        transaction_time: item.time, reported_payment_method: item.method, date_source: 'reported',
       }, item.id);
-      assert.equal((await row(item.id)).outcome, 'pending');
+      assert.equal((await row(item.id)).outcome, 'registered');
     }
     for (const item of guards) {
       const saved = (await db.query('SELECT status,reason FROM notices WHERE message_id=$1', [item.id])).rows[0];
-      assert.deepEqual(saved, { status: 'pending', reason: 'unconfirmed_extraction' }, item.id);
+      assert.deepEqual(saved, item.id === 'review-untrusted' ? { status: 'pending', reason: 'unconfirmed_extraction' } :
+        { status: 'registered', reason: null }, item.id);
     }
-    assert.equal((await db.query('SELECT count(*)::int AS total FROM transactions')).rows[0].total, movementsBefore,
-      'Review evidence never invents or mutates an economic movement');
+    assert.equal((await db.query('SELECT count(*)::int AS total FROM transactions')).rows[0].total, movementsBefore + 7,
+      'The five transfers, own transfer and completed credit purchase register once; untrusted mail does not');
     await finishScan();
     webhookStatus = 202;
   });
 
   await t.test('a registered transfer is enriched locally while preserving its financial values', async () => {
-    for (const mode of ['plain', 'alternative', 'alternative-reversed']) {
+    for (const mode of ['plain', 'alternative', 'alternative-reversed', 'fallback-vs-reported']) {
       const id = 'registered-transfer-review-' + mode;
       const sender = 'alertasynotificaciones@an.notificacionesbancolombia.com';
-      const body = 'Bancolombia: Recibiste una transferencia por $35.000 el ' + received.toFormat('dd/MM/yy') + ' a las 21:11.';
+      const operationDay = mode === 'fallback-vs-reported' ? received.minus({ days: 1 }) : received;
+      const body = 'Bancolombia: Recibiste una transferencia por $35.000 el ' + operationDay.toFormat('dd/MM/yy') + ' a las 21:11.';
       const header = 'From: <' + sender + '>\r\nSubject: Alertas y Notificaciones\r\n' +
         'Authentication-Results: mx.google.com; dmarc=pass header.from=notificacionesbancolombia.com\r\nMIME-Version: 1.0\r\n';
-      const incompleteBody = 'Bancolombia: Recibiste una transferencia. Consulta el detalle en la versión HTML.';
+      const incompleteBody = mode === 'fallback-vs-reported' ? 'Bancolombia: Recibiste una transferencia por $35.000.' :
+        'Bancolombia: Recibiste una transferencia. Consulta el detalle en la versión HTML.';
+      const richerHtml = mode === 'alternative' || mode === 'fallback-vs-reported';
       const message = Buffer.from(header + (mode === 'plain' ? 'Content-Type: text/plain; charset=UTF-8\r\n\r\n' + body :
         'Content-Type: multipart/alternative; boundary=banknotice\r\n\r\n' +
-        '--banknotice\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n' + (mode === 'alternative' ? incompleteBody : body) + '\r\n' +
-        '--banknotice\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<p>' + (mode === 'alternative' ? body : incompleteBody) + '</p>\r\n--banknotice--\r\n'));
+        '--banknotice\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n' + (richerHtml ? incompleteBody : body) + '\r\n' +
+        '--banknotice\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<p>' + (richerHtml ? body : incompleteBody) + '</p>\r\n--banknotice--\r\n'));
       rawById.set(id, message.toString('base64url'));
       if (mode === 'alternative') {
         const parsed = await readGmailMime(message, ['INBOX']);
@@ -354,19 +359,17 @@ test('Gmail reconciles a bounded month, exposes failures and recovers without re
         const plain = await extractor.classify(parsed.email, false, parsed.authenticated, received.toISO()!);
         const html = await extractor.classify({ ...parsed.email, text: parsed.alternative! }, false, parsed.authenticated, received.toISO()!);
         assert.equal(plain.status, 'pending');
-        assert.equal(html.status, 'pending');
-        if (plain.status === 'pending' && html.status === 'pending') {
-          assert.deepEqual(plain.unconfirmedFields, []);
-          assert.deepEqual(html.unconfirmedFields, []);
+        assert.equal(html.status, 'registered');
+        if (plain.status === 'pending' && html.status === 'registered') {
           assert.equal(plain.evidence?.amountMinor, undefined);
-          assert.equal(html.evidence?.amountMinor, '3500000');
+          assert.equal(html.movement.amountMinor, '3500000');
         }
       }
       const { rows: [notice] } = await db.query<{ id: string }>(
         'INSERT INTO notices (mailbox_id,message_id,received_at,provider,forwarded,status,transaction_time,reported_payment_method) ' +
         "VALUES ($1,$2,$3,'other',false,'registered','21:11','Transferencia') RETURNING id", [mailbox.id, id, received.toJSDate()]);
       await db.query('INSERT INTO transactions (notice_id,amount_minor,currency,transaction_date,payment_method,description,category,direction) ' +
-        "VALUES ($1,3500000,'COP',$2,'Transferencia','Descripción conservada','ingresos','income')", [notice.id, received.toISODate()]);
+        "VALUES ($1,3500000,'COP',$2,'Transferencia','Descripción conservada','ingresos','income')", [notice.id, operationDay.toISODate()]);
       const postedBefore = posted.length;
       const finances = () => db.query('SELECT amount_minor::text,currency,transaction_date::text,payment_method,description,category,direction ' +
         'FROM transactions WHERE notice_id=$1', [notice.id]);
@@ -391,8 +394,8 @@ test('Gmail reconciles a bounded month, exposes failures and recovers without re
       { id: 'mime-amount-conflict', plain: original, html: original.replace('$35.000', '$45.000'), amount: null, date: null },
       { id: 'mime-date-conflict', plain: original,
         html: original.replace(date, received.minus({ days: 1 }).toFormat('dd/MM/yy')), amount: null, date: null },
-      { id: 'mime-complementary', plain: 'Bancolombia: Recibiste una transferencia por $35.000.',
-        html: `Bancolombia: Recibiste una transferencia el ${date}.`, amount: '3500000', date: null },
+      { id: 'mime-complementary', plain: 'Bancolombia: Recibiste una transferencia por $36.000.',
+        html: `Bancolombia: Recibiste una transferencia el ${date}.`, amount: null, date: null },
       { id: 'mime-pending-registered-conflict', plain: original,
         html: `Bancolombia: Compraste $35.000 en TIENDA DEMO con tu T.Deb *1234, el ${date} a las 21:11.`, amount: null, date: null },
     ];
@@ -411,8 +414,13 @@ test('Gmail reconciles a bounded month, exposes failures and recovers without re
     for (const _ of ids) assert.equal(await gmail.dispatchOne(), true);
     for (const item of cases) assert.deepEqual((await db.query(
       'SELECT status,reason,reported_amount_minor::text,reported_transaction_date::text FROM notices WHERE message_id=$1', [item.id])).rows[0],
-    { status: 'pending', reason: 'unconfirmed_extraction', reported_amount_minor: item.amount, reported_transaction_date: item.date }, item.id);
-    assert.equal((await db.query('SELECT count(*)::int AS total FROM transactions')).rows[0].total, movementsBefore);
+    { status: item.id === 'mime-complementary' ? 'registered' : 'pending', reason: item.id === 'mime-complementary' ? null : 'unconfirmed_extraction',
+      reported_amount_minor: item.amount, reported_transaction_date: item.date }, item.id);
+    const fallback = (await db.query('SELECT n.date_source,n.transaction_time,t.amount_minor::text,t.transaction_date::text ' +
+      "FROM notices n JOIN transactions t ON t.notice_id=n.id WHERE n.message_id='mime-complementary'")).rows[0];
+    assert.deepEqual(fallback, { date_source: 'received_at', transaction_time: received.toFormat('HH:mm:ss'),
+      amount_minor: '3600000', transaction_date: received.toISODate() });
+    assert.equal((await db.query('SELECT count(*)::int AS total FROM transactions')).rows[0].total, movementsBefore + 1);
     assert.equal(posted.length, postedBefore);
     await finishScan();
   });

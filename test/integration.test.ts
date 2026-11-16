@@ -10,6 +10,7 @@ import { Agent } from '../src/agent.js';
 import { readConfig } from '../src/config.js';
 import { Database } from '../src/db.js';
 import { Gmail } from '../src/gmail.js';
+import { GmailExtraction } from '../src/gmail-extraction.js';
 import { createApp } from '../src/main.js';
 import { Worker } from '../src/worker.js';
 import { agaval, agavalModel, agavalSubject, bank, bankPurchase, bankPurchaseSubject, bankSender, filterAndResolve, goodModel, legacyInput,
@@ -67,6 +68,17 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
   const base = await app.getUrl();
   const db = app.get(Database);
   const gmail = app.get(Gmail);
+  const extractor = app.get(GmailExtraction);
+  const classify = extractor.classify.bind(extractor);
+  // This fixed receipt represents a format unsupported by local rules, so the transport checks
+  // still exercise webhook retries/callbacks while other tests verify today's cash-flow rules.
+  t.mock.method(extractor, 'classify', async (...args: Parameters<typeof classify>) => {
+    if (args[0].from === bankSender && args[0].text.trim() === bank) {
+      return { provider: 'other' as const, forwarded: false, status: 'pending' as const,
+        reason: 'missing_or_ambiguous_fields' as const, confidence: 0 };
+    }
+    return classify(...args);
+  });
   const worker = new Worker(db, config, gmail, app.get(Agent));
   t.after(() => worker.onApplicationShutdown());
   t.after(async () => {
@@ -187,12 +199,12 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
   const bre = filterAndResolve(legacyInput('bre-b', simulatedArrival,
     'Enviaste de manera exitosa 41.500 a la llave 1000000000 de PERSONA DEMO el 11 de noviembre de 2026 a las 4:13 a.m.',
     'notificaciones@nequi.com.co', '¡Enviaste plata por Bre-B!'), uncertainModel);
-  assert.equal(bre.status, 'pending');
+  assert.equal(bre.status, 'registered');
   assert.equal((await (await post(bre)).json()).outcome, 'stored');
   const { rows: [breSaved] } = await db.query(
     'SELECT n.id,t.id AS movement,n.reported_payment_method FROM notices n LEFT JOIN transactions t ON t.notice_id=n.id ' +
     'WHERE n.message_id=$1', ['bre-b']);
-  assert.equal(breSaved.movement, null);
+  assert.ok(breSaved.movement, 'A completed transfer with amount and direction registers without purpose review');
   assert.equal(breSaved.reported_payment_method, 'Bre-B');
 
   const session = (await (await request('chat/sessions', 'POST', undefined, owner)).json()).id;
@@ -235,7 +247,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
   const review = { amountMinor: '4200000', currency: 'COP', date: '2020-01-02', direction: 'income' };
   const confirm = (path: string, data = review, cookie = owner) => request(path + '/confirm', 'POST', data, cookie);
   const discard = (path: string, cookie = owner) => request(path, 'DELETE', undefined, cookie);
-  assert.equal((await discard('notices/' + breSaved.id)).status, 204);
+  assert.equal((await discard('notices/' + breSaved.id)).status, 409, 'An automatically registered transfer cannot be discarded as a pending notice');
   assert.equal((await confirm(pendingPath, review, other)).status, 404);
   assert.equal((await discard(pendingPath, other)).status, 404);
   assert.equal((await confirm(pendingPath, { ...review, amountMinor: '0' })).status, 400);
@@ -310,7 +322,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
     'past-copy': rawMessage('Alertas y Notificaciones', deposits, bankAddress, true),
     'past-personal': rawMessage('Faltan fondos para pagar en Google', 'Faltan fondos para pagar $19.900 en Google.', 'nu@nu.com.co', 'nu.com.co'),
     'past-not-authenticated': rawMessage('Faltan fondos para pagar en Google', 'Faltan fondos para pagar $9.900 en Google.', 'nu@nu.com.co'),
-    'past-uncertain': rawMessage('Pago recibido', 'Recibimos tu pago de $37.200 el ' + operationDay + '.', shopSender, shopSender.split('@')[1]),
+    'past-uncertain': rawMessage('Pago recibido', 'Recibimos tu pago el ' + operationDay + '. El importe no aparece en este aviso.', shopSender, shopSender.split('@')[1]),
     'outside-month': rawMessage('Alertas y Notificaciones', deposits, bankAddress, true),
     'contradictory-mime': Buffer.from([
       'From: <' + bankAddress + '>', 'Subject: Alertas y Notificaciones',

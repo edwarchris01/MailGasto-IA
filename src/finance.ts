@@ -57,7 +57,7 @@ type Movement = {
 type EmailOriginal = { amount_minor: string; transaction_date: string; category: string; direction: string };
 type EmailAdjustment = { amount_minor: string | null; transaction_date: string | null; revision: number };
 const fields = 'm.id,m.source,m.notice_id,m.provider,m.amount_minor::text,m.currency,m.transaction_date::text,' +
-  'm.payment_method,m.description,m.category,m.direction';
+  'm.payment_method,m.description,m.category,m.direction,m.date_source,m.received_at';
 const where = 'account_id=$1 AND ($2::date IS NULL OR transaction_date >= $2) ' +
   'AND ($3::date IS NULL OR transaction_date <= $3) AND ($4::text IS NULL OR currency=$4) ' +
   'AND ($5::text IS NULL OR category=$5)';

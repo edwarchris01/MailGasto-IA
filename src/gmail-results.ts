@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { createHmac } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
+import { DateTime } from 'luxon';
 import { queueMail } from './accounts.js';
 import { CONFIG, Config } from './config.js';
 import { Database } from './db.js';
@@ -23,6 +24,7 @@ const timestamp = z.iso.datetime({ offset: true });
 const day = z.iso.date().refine(value => !value.startsWith('0000'));
 const paymentMethod = z.enum(paymentMethods).nullable();
 const optionalDetails = {
+  dateSource: z.enum(['reported', 'received_at']).optional(),
   transactionTime: z.string().regex(transactionTimePattern).nullish(),
   cardType: z.enum(cardTypes).nullish(),
   cardLast4: z.string().regex(cardLast4Pattern).nullish(),
@@ -132,9 +134,9 @@ async function saveFingerprints(client: PoolClient, id: string, fingerprints: st
 }
 
 const discardNotice = "UPDATE notices n SET status='discarded',reason=$1,confidence=0,unconfirmed_fields=NULL," +
-  'reported_transaction_date=NULL,transaction_time=NULL,reported_payment_method=NULL,card_type=NULL,card_last4=NULL,' +
+  'reported_transaction_date=NULL,date_source=NULL,transaction_time=NULL,reported_payment_method=NULL,card_type=NULL,card_last4=NULL,' +
   'reported_institution=NULL,reported_amount_minor=NULL,reported_currency=NULL,reported_direction=NULL,avalpay_partial=false ' +
-  "WHERE n.status='pending' AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.notice_id=n.id) ";
+  "WHERE n.status IN ('pending','error') AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.notice_id=n.id) ";
 
 async function discardUnregisteredNotices(client: PoolClient, filter: string, values: unknown[]) {
   const { rows } = await client.query<{ id: string }>(discardNotice + filter + ' RETURNING n.id', values);
@@ -230,6 +232,17 @@ export class GmailResults {
         logGmailDelivery('retry_exhausted', result.reason, attempts, startedAt);
         result = { ...result, status: 'error', reason: 'extractor_unavailable', confidence: 0 };
       }
+      // The connector-bound reception timestamp is authoritative for the explicitly requested fallback.
+      // Never persist a model-supplied clock or label a reception date as a date reported by the bank.
+      if (result.status === 'registered' && result.movement.dateSource === 'received_at') {
+        const reception = DateTime.fromJSDate(received).setZone('America/Bogota');
+        result = { ...result, movement: { ...result.movement, date: reception.toISODate()!,
+          transactionTime: reception.toFormat('HH:mm:ss') } };
+      } else if (result.status === 'pending' && result.evidence?.dateSource === 'received_at') {
+        const reception = DateTime.fromJSDate(received).setZone('America/Bogota');
+        result = { ...result, evidence: { ...result.evidence, date: reception.toISODate()!,
+          transactionTime: reception.toFormat('HH:mm:ss') } };
+      }
       result = requireGmailAuthentication(result, authenticated, forwarded);
       verifiedBank &&= authenticated && !forwarded;
       explicitNonMovement &&= authenticated && !forwarded;
@@ -248,6 +261,10 @@ export class GmailResults {
         if (prior) {
           const same = value && prior.amount_minor === value.amountMinor && prior.currency === value.currency &&
             prior.transaction_date === value.date && prior.direction === value.direction;
+          if (same && authenticated && !forwarded && prior.reason !== 'user_confirmed' && value) {
+            await client.query('UPDATE notices SET date_source=$2 WHERE id=$1 AND date_source IS NULL ' +
+              "AND ($2='reported' OR reported_transaction_date IS NULL)", [prior.id, value.dateSource ?? 'reported']);
+          }
           if (same && result.status === 'registered' && prior.reason !== 'user_confirmed') {
             await saveFingerprints(client, prior.id, fingerprints);
             await discardAvalCopies(client, mailbox.account_id, prior.id, result.movement, fingerprints, result.references);
@@ -264,7 +281,7 @@ export class GmailResults {
               'AND (card_type IS NULL OR $5::text IS NULL OR card_type=$5) THEN COALESCE(card_last4,$6) ELSE card_last4 END,' +
               'reported_institution=COALESCE(reported_institution,$7),' +
               "provider=CASE WHEN provider='other' THEN $8 ELSE provider END WHERE id=$1",
-              [prior.id, value.date, value.transactionTime ?? null, value.paymentMethod, value.cardType ?? null,
+              [prior.id, value.dateSource === 'received_at' ? null : value.date, value.transactionTime ?? null, value.paymentMethod, value.cardType ?? null,
                 value.cardLast4 ?? null, value.reportedInstitution ?? result.provider, result.provider],
             );
             if (value.paymentMethod) await client.query(
@@ -289,7 +306,8 @@ export class GmailResults {
         const matched = matches[0];
         if (matched && matches.length === 1 && value && matched.amount_minor === value.amountMinor && matched.currency === value.currency &&
             matched.direction === (value.direction ?? (result.status === 'pending' && result.avalCopy ? 'expense' : null)) &&
-            (matched.transaction_date === value.date || value.date === null && result.status === 'pending' && result.avalCopy)) {
+            (matched.transaction_date === value.date || (value.date === null || value.dateSource === 'received_at') &&
+              result.status === 'pending' && result.avalCopy)) {
           await saveFingerprints(client, matched.id, fingerprints);
           if (result.status === 'registered' && result.categoryFromPseConcept) {
             await client.query('UPDATE transactions t SET category=$2 FROM notices n WHERE n.id=$1 ' +
@@ -315,10 +333,11 @@ export class GmailResults {
             // Different operation times from the same authenticated bank and payment channel distinguish
             // two purchases. A manual entry, a missing time, or a different issuer remains ambiguous.
             'AND NOT COALESCE(($8::boolean AND n.provider=$9 AND n.forwarded=false AND n.reason IS NULL ' +
+            "AND n.date_source IS DISTINCT FROM 'received_at' " +
             'AND n.transaction_time IS NOT NULL AND left(n.transaction_time,5)<>left($10::text,5) ' +
             'AND $11::text IS NOT NULL AND n.reported_payment_method=$11),false) LIMIT 1',
             [mailbox.account_id, value.currency, value.direction, value.amountMinor, value.date, mailbox.id, result.messageId,
-              authenticated && !forwarded && result.provider !== 'other', result.provider,
+              authenticated && !forwarded && result.provider !== 'other' && value.dateSource !== 'received_at', result.provider,
               value.transactionTime ?? null, value.paymentMethod],
           );
           if (matched.rowCount) result = duplicateForReview(result);
@@ -331,26 +350,26 @@ export class GmailResults {
         const { rows: [saved] } = await client.query<{ id: string }>(
           'INSERT INTO notices (mailbox_id,message_id,received_at,provider,forwarded,status,reason,confidence,accepted_at,completed_at,unconfirmed_fields,' +
           'reported_transaction_date,transaction_time,reported_payment_method,card_type,card_last4,reported_institution,' +
-          'reported_amount_minor,reported_currency,reported_direction,avalpay_partial) ' +
-          'VALUES ($1,$2,$3,$4,$5,$6,$7,$8,LEAST($9,clock_timestamp()),clock_timestamp(),$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$21) ' +
+          'reported_amount_minor,reported_currency,reported_direction,avalpay_partial,date_source) ' +
+          'VALUES ($1,$2,$3,$4,$5,$6,$7,$8,LEAST($9,clock_timestamp()),clock_timestamp(),$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$21,$22) ' +
           'ON CONFLICT (mailbox_id,message_id) DO UPDATE SET ' +
           '(provider,forwarded,status,reason,confidence,accepted_at,completed_at,unconfirmed_fields,' +
           'reported_transaction_date,transaction_time,reported_payment_method,card_type,card_last4,reported_institution,' +
-          'reported_amount_minor,reported_currency,reported_direction,avalpay_partial)=' +
+          'reported_amount_minor,reported_currency,reported_direction,avalpay_partial,date_source)=' +
           '(excluded.provider,excluded.forwarded,excluded.status,excluded.reason,excluded.confidence,excluded.accepted_at,' +
           'excluded.completed_at,excluded.unconfirmed_fields,excluded.reported_transaction_date,excluded.transaction_time,' +
           'excluded.reported_payment_method,excluded.card_type,excluded.card_last4,excluded.reported_institution,' +
-          'excluded.reported_amount_minor,excluded.reported_currency,excluded.reported_direction,excluded.avalpay_partial) ' +
+          'excluded.reported_amount_minor,excluded.reported_currency,excluded.reported_direction,excluded.avalpay_partial,excluded.date_source) ' +
           "WHERE $20::uuid IS NOT NULL AND notices.status IN ('pending','error') " +
           "AND (notices.status<>'pending' OR excluded.status<>'error') " +
           'AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.notice_id=notices.id) RETURNING id',
           [mailbox.id, result.messageId, received, result.provider, result.forwarded, result.status,
             'reason' in result ? result.reason : null, result.confidence, accepted,
             result.status === 'pending' ? result.unconfirmedFields ?? null : null,
-            evidence?.date ?? null, evidence?.transactionTime ?? null, evidence?.paymentMethod ?? null,
+            evidence?.dateSource === 'received_at' ? null : evidence?.date ?? null, evidence?.transactionTime ?? null, evidence?.paymentMethod ?? null,
             evidence?.cardType ?? null, evidence?.cardLast4 ?? null, evidence?.reportedInstitution ?? null,
             suggested?.amountMinor ?? null, suggested?.currency ?? null, suggested?.direction ?? null, reprocessId,
-            result.status === 'pending' && result.avalCopy === true],
+            result.status === 'pending' && result.avalCopy === true, evidence?.date ? evidence.dateSource ?? 'reported' : null],
         );
         if (saved) {
           if (reprocessId && result.status !== 'error') {
