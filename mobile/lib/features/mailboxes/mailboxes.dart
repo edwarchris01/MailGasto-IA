@@ -10,6 +10,7 @@ import '../../core/format.dart';
 import '../../core/google_browser.dart';
 import '../../core/widgets.dart';
 import '../auth/auth.dart';
+import '../expenses/finance.dart';
 
 typedef Mailbox = ({
   String id,
@@ -20,7 +21,35 @@ typedef Mailbox = ({
   bool openAiAvailable,
   bool openAiEnabled,
   ReprocessStatus? reprocess,
+  DeliveryStatus? delivery,
 });
+
+class DeliveryStatus {
+  DeliveryStatus(Json row)
+    : queued = row['queued'] as int? ?? 0,
+      retrying = row['retrying'] as int? ?? 0,
+      failed = row['failed'] as int? ?? 0,
+      lastError = row['lastError'] as String?;
+
+  final int queued, retrying, failed;
+  final String? lastError;
+
+  bool get visible => queued > 0 || failed > 0;
+  String? get explanation => switch (lastError) {
+    'webhook_auth_rejected' =>
+      'La conexión del servicio de procesamiento necesita revisión.',
+    'gmail_access_revoked' => 'Reconecta Gmail para continuar la revisión.',
+    'webhook_timeout' ||
+    'webhook_unavailable' ||
+    'callback_timeout' ||
+    'extractor_unavailable' ||
+    'ollama_unavailable' => 'El servicio de procesamiento no respondió.',
+    'contract_rejected' || 'invalid_gmail_message' || 'invalid_model_output' =>
+      'No se pudo interpretar la información de algunos correos.',
+    null => null,
+    _ => 'Algunos correos aún no pudieron revisarse.',
+  };
+}
 
 class ReprocessStatus {
   ReprocessStatus(Json row)
@@ -90,6 +119,9 @@ class MailboxRepository {
           reprocess: row['reprocess'] == null
               ? null
               : ReprocessStatus(row['reprocess'] as Json),
+          delivery: row['delivery'] == null
+              ? null
+              : DeliveryStatus(row['delivery'] as Json),
         ),
       )
       .toList();
@@ -141,6 +173,7 @@ class MailboxesScreen extends ConsumerStatefulWidget {
 class _MailboxesScreenState extends ConsumerState<MailboxesScreen> {
   bool _busy = false;
   Timer? _poll;
+  Set<String> _runningReprocesses = {};
 
   @override
   void initState() {
@@ -148,9 +181,23 @@ class _MailboxesScreenState extends ConsumerState<MailboxesScreen> {
     ref.listenManual(mailboxesProvider, (_, next) {
       final mailboxes = next.asData?.value;
       if (mailboxes == null) return;
+      if (mailboxes.any(
+        (mailbox) =>
+            _runningReprocesses.contains(mailbox.id) &&
+            mailbox.reprocess?.running == false,
+      )) {
+        refreshImportedData(ref);
+      }
+      _runningReprocesses = {
+        for (final mailbox in mailboxes)
+          if (mailbox.reprocess?.running == true) mailbox.id,
+      };
       if (mailboxes.any((mailbox) => mailbox.reprocess?.running == true)) {
         _poll ??= Timer.periodic(const Duration(seconds: 4), (_) {
-          if (mounted && !ref.read(mailboxesProvider).isLoading) {
+          final lifecycle = WidgetsBinding.instance.lifecycleState;
+          if (mounted &&
+              (lifecycle == null || lifecycle == AppLifecycleState.resumed) &&
+              !ref.read(mailboxesProvider).isLoading) {
             ref.invalidate(mailboxesProvider);
           }
         });
@@ -505,6 +552,19 @@ class _MailboxCard extends StatelessWidget {
           if (reprocess != null) ...[
             const SizedBox(height: 12),
             _ReprocessResult(reprocess),
+          ],
+          if (mailbox.delivery case final delivery? when delivery.visible) ...[
+            const SizedBox(height: 12),
+            AppNotice(
+              icon: Icons.mark_email_unread_outlined,
+              tone: delivery.failed > 0 ? AppTone.warning : AppTone.info,
+              title: 'Procesamiento de correos',
+              description: [
+                '${delivery.queued} por procesar (${delivery.retrying} en reintento) · '
+                    '${delivery.failed} con error',
+                ?delivery.explanation,
+              ].join('\n'),
+            ),
           ],
           if (canReprocess) ...[
             const SizedBox(height: 10),

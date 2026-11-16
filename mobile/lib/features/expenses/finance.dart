@@ -70,6 +70,12 @@ void refreshFinance(WidgetRef ref) {
   ref.invalidate(movementProvider);
 }
 
+void refreshImportedData(WidgetRef ref) {
+  refreshFinance(ref);
+  ref.invalidate(historyProvider);
+  ref.invalidate(noticeProvider);
+}
+
 class Movement {
   Movement.fromJson(Json row)
     : id = row['id'] as String,

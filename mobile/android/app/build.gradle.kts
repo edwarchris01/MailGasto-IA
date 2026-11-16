@@ -1,3 +1,5 @@
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
@@ -21,6 +23,14 @@ android {
 
     defaultConfig {
         applicationId = "co.com.styleplus.mailgasto"
+        val auditBuild = providers.gradleProperty("dart-defines").orNull
+            ?.split(",")?.any {
+                runCatching { String(Base64.getDecoder().decode(it), Charsets.UTF_8) }
+                    .getOrNull() == "MAILGASTO_ANDROID_AUDIT=true"
+            } ?: false
+        if (auditBuild) {
+            applicationIdSuffix = ".audit"
+        }
         manifestPlaceholders["mailgastoAppLinkHost"] =
             providers.gradleProperty("mailgastoAppLinkHost").getOrElse("mailgasto.styleplus.com.co")
         minSdk = flutter.minSdkVersion

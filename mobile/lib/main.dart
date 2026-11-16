@@ -207,17 +207,20 @@ class MailGastoApp extends ConsumerStatefulWidget {
   ConsumerState<MailGastoApp> createState() => _MailGastoAppState();
 }
 
-class _MailGastoAppState extends ConsumerState<MailGastoApp> {
+class _MailGastoAppState extends ConsumerState<MailGastoApp>
+    with WidgetsBindingObserver {
   final _messenger = GlobalKey<ScaffoldMessengerState>();
   StreamSubscription<Uri>? _links;
   Uri? _pending;
   bool _processing = false;
   String? _lastReceipt;
   String? _pendingDeletion;
+  bool _wasBackgrounded = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _links = (widget.links ?? AppLinks().uriLinkStream).listen((link) {
       final origin = ref.read(apiProvider).origin;
       if (link.scheme != 'https' ||
@@ -352,7 +355,22 @@ class _MailGastoAppState extends ConsumerState<MailGastoApp> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      _wasBackgrounded = true;
+    } else if (state == AppLifecycleState.resumed && _wasBackgrounded) {
+      _wasBackgrounded = false;
+      if (ref.read(authProvider).asData?.value != null) {
+        refreshImportedData(ref);
+        ref.invalidate(mailboxesProvider);
+      }
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     unawaited(_links?.cancel());
     super.dispose();
   }
@@ -398,12 +416,12 @@ class _SessionScreen extends ConsumerWidget {
   );
 }
 
-class _MainMenu extends StatelessWidget {
+class _MainMenu extends ConsumerWidget {
   const _MainMenu(this.shell);
   final StatefulNavigationShell shell;
 
   @override
-  Widget build(BuildContext context) => Scaffold(
+  Widget build(BuildContext context, WidgetRef ref) => Scaffold(
     body: shell,
     bottomNavigationBar: DecoratedBox(
       decoration: const BoxDecoration(
@@ -418,10 +436,11 @@ class _MainMenu extends StatelessWidget {
               ? NavigationDestinationLabelBehavior.onlyShowSelected
               : NavigationDestinationLabelBehavior.alwaysShow,
           selectedIndex: shell.currentIndex,
-          onDestinationSelected: (index) => shell.goBranch(
-            index,
-            initialLocation: index == shell.currentIndex,
-          ),
+          onDestinationSelected: (index) {
+            if (index <= 2) refreshImportedData(ref);
+            if (index == 4) ref.invalidate(mailboxesProvider);
+            shell.goBranch(index, initialLocation: index == shell.currentIndex);
+          },
           destinations: const [
             NavigationDestination(
               icon: Icon(Icons.home_outlined),
