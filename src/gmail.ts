@@ -16,7 +16,7 @@ const tokenUrl = 'https://oauth2.googleapis.com/token';
 const maxRawSize = 1_500_000;
 const maxReprocessAttempts = 5;
 // Bump when extraction rules change: unresolved notices receive one new review.
-export const gmailClassifierVersion = '2026-11-16.3';
+export const gmailClassifierVersion = '2026-11-16.4';
 const recoverableDeliveryErrors = ['webhook_timeout', 'webhook_unavailable', 'callback_timeout',
   'gmail_processing_failed', 'attempts_exhausted', 'extractor_unavailable', 'ollama_unavailable', 'invalid_model_output'];
 

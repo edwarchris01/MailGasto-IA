@@ -20,17 +20,20 @@ const nequiIncomingAccount = /\b(?:recibiste|te (?:enviaron|transfirieron|abonar
 const nequiOutgoingAccount = /\b(?:enviaste|transferiste|pagaste|compraste|retiraste)\b(?:[^.!?\n;]|\.(?=\d)){0,220}\bdesde tu nequi\b/;
 const equivalentIncomingVerb = /\b(?:te envi[oó]|te lleg[oó](?: (?:plata|dinero))?(?: por)?|has recibido)[ \t]+(?=(?:COP[ \t]*|USD[ \t]*|EUR[ \t]*|US\$[ \t]*|[$€][ \t]*)?\d)/giu;
 const futureOrNegatedIncome = /\b(?:te (?:enviara|enviaran|va a enviar|van a enviar|llegara|llegaran)|recibiras|no (?:has recibido|te (?:llego|envio)))\b/;
+const negatedMoneyFlow = /\bno (?:se )?te (?:enviaron|transfirieron|abonaron|acreditaron|consignaron|reembolsaron|devolvieron|debitaron|cobraron|descontaron)\b/;
 
 function smsOperationText(body: string) {
+  const principal = body.split(/(?:[.!?]\s+|\n)(?:si|en caso de que)\s+/i, 1)[0];
+  if (/^(?:\s*nequi\s*[:：-])?\s*(?:si|cuando|en caso|quizas?|tal vez|podria|habria)\b/.test(normalize(principal))) return '';
   // Equivalent completed-money verbs only. Amounts, dates and source labels are unchanged.
-  return body.replace(equivalentIncomingVerb, (verb: string, offset: number) => {
-    const prefix = normalize(body.slice(Math.max(0, offset - 220), offset)).split(/[!?;\n]|\.(?!\d)/).at(-1) ?? '';
+  return principal.replace(equivalentIncomingVerb, (verb: string, offset: number) => {
+    const prefix = normalize(principal.slice(Math.max(0, offset - 220), offset)).split(/[!?;\n]|\.(?!\d)/).at(-1) ?? '';
     return /\b(?:no|nunca)[ \t]+$|\b(?:si|cuando|en caso|quizas?|tal vez|podria|habria)\b/.test(prefix) ? verb : 'Te abonaron ';
   });
 }
 
 function smsNonMovement(body: string, operation: string) {
-  return isGmailExplicitNonMovement('', operation) || futureOrNegatedIncome.test(normalize(body)) &&
+  return negatedMoneyFlow.test(normalize(operation)) || isGmailExplicitNonMovement('', operation) || futureOrNegatedIncome.test(normalize(body)) &&
     !inspectGmailNotice({ subject: '', body: operation }).hasCompletion;
 }
 
@@ -107,6 +110,6 @@ export function parseNequiSms(input: NequiSmsInput, allowedSenders: readonly str
   if (result.status !== 'registered') return {
     status: 'unconfirmed', reason: 'missing_or_ambiguous_fields', insufficientFields: result.unconfirmedFields,
   };
-  const references = smsReferences(input.body, result.movement);
+  const references = smsReferences(operation, result.movement);
   return { status: 'registered', movement: result.movement, ...(references.length ? { references } : {}) };
 }

@@ -99,6 +99,33 @@ test('a synthetic paid LinkedIn Premium receipt survives the same notification f
     result.movement?.date, result.movement?.dateSource], ['4990000', 'COP', 'expense', '2026-11-13', 'reported']);
 });
 
+test('the observed DataCredito abandoned checkout is ignored while paid or refunded receipts remain eligible', () => {
+  const from = 'contenido@midatacredito.com';
+  const subject = 'Completa tu compra y disfruta con total seguridad.';
+  const body = 'Estás a un paso de entender tu vida financiera. Vimos que iniciaste la activación de tu Plan Perfil, ' +
+    'pero no finalizaste el proceso. Retómalo y empieza a entender tu vida financiera. Retomar compra. ' +
+    'Consulta tu información crediticia. Entiende tu perfil financiero. Identifica oportunidades de mejora. ' +
+    'Toma decisiones financieras con más claridad. No se trata solo de números, se trata de saber dónde estás hoy ' +
+    'para decidir mejor mañana. Retomar compra de mi plan.';
+  assert.equal(candidate(from, subject, body, gmailBankSenders, true), null);
+  assert.equal(isGmailExplicitNonMovement(subject, body), true);
+  assert.equal(resolveGmailExtraction({ provider: 'other', forwarded: false, subject, body }, null,
+    true, undefined, '2026-11-15T07:27:00Z').status, 'ignored');
+  // Synthetic completed-money controls: the abandoned-checkout copy is not a domain block.
+  for (const [operation, direction] of [
+    ['Recibimos tu pago por COP 21.000 el 15/11/2026.', 'expense'],
+    ['Te reembolsaron COP 21.000 el 15/11/2026.', 'income'],
+  ]) {
+    const receipt = operation + '\nPuedes retomar compra de otro plan.';
+    const notice = candidate(from, 'Comprobante de tu operación', receipt, gmailBankSenders, true);
+    assert.ok(notice);
+    assert.equal(isGmailExplicitNonMovement(notice.subject, receipt), false);
+    const result = resolveGmailExtraction(notice, null, true);
+    assert.equal(result.status, 'registered');
+    assert.deepEqual([result.movement?.amountMinor, result.movement?.direction], ['2100000', direction]);
+  }
+});
+
 test('Nequi outgoing Bre-B registers bare amounts and Spanish dates without requiring a purpose', () => {
   for (const [amount, clock, expectedTime] of [['80.000', 'a la 1:12 a.m.', '01:12'], ['440.000', 'a las 4:13 a.m.', '04:13']]) {
     const notice = candidate('notificaciones@nequi.com.co', '¡Enviaste plata por Bre-B!',

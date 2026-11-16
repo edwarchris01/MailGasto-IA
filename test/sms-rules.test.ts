@@ -86,6 +86,10 @@ test('synthetic equivalent incoming-money verbs register while promises, request
     'Nequi: Ana te envió una solicitud de pago por $50.000.',
     'Nequi: Si Ana te envió $50.000, revisa los movimientos.',
     'Nequi: Tal vez Ana te envió $50.000.',
+    'Nequi: No te reembolsaron COP 50.000.',
+    'Nequi: No te enviaron COP 50.000.',
+    'Nequi: No te debitaron COP 50.000.',
+    'Nequi: Si no te reembolsaron COP 50.000, revisa los movimientos.',
   ]) {
     assert.equal(isNequiSmsCandidate({ sender, body }), false, body);
     assert.equal(parse(body).status, 'ignored', body);
@@ -147,6 +151,7 @@ test('SMS canceled, rejected and pending operations never become effective movem
   for (const body of [
     'Nequi: Tu compra por COP 80.000 fue cancelada. Te reembolsaron COP 80.000 el 15/11/2026.',
     'Nequi: Pagaste COP 80.000 el 15/11/2026. Si tu pago por COP 80.000 fue rechazado, comunicate con nosotros.',
+    'Nequi: Pagaste COP 80.000 el 15/11/2026. Si no te reembolsaron COP 80.000, comunicate con nosotros.',
   ]) assert.equal(parse(body).status, 'registered', body);
 });
 
