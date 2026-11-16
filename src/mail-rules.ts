@@ -78,7 +78,8 @@ const noChargeTrial = /\b(?:suscripcion de prueba|prueba gratuita|free trial)\b/
 const confirmedAmountPaid = /\b(?:se realizaron los cargos|total pagado|amount paid)\b/;
 const receiptSubject = /\b(?:comprobante de (?:compra|pago|transferencia)|confirmacion de pago|pago (?:recibido|exitoso|aprobado|procesado|confirmado)|transaccion (?:aprobada|exitosa)|recibo de (?:pago|pedido|compra)|recibo de tu pedido|payment receipt|devolvio el dinero)\b/;
 const receiptEvidence = /\b(?:we(?:'ve)? received (?:your )?payment|pago exitoso|estado\s*:\s*(?:exitoso|aprobado|pagado)|monto desembolsado)\b/;
-const mailingListDelivery = /\b(?:recibiste|recibes) este (?:mail|correo(?: electronico)?|mensaje) porque\b/;
+const mailingListDelivery = /\b(?:recibiste|recibes) este (?:mail|correo(?: electronico)?|mensaje) porque\b|\brecibes (?:emails|correos(?: electronicos)?) sobre notificaciones\b/;
+const employmentAlert = /\b(?:empresas que buscan personal|buscan personal para (?:el puesto|tu cargo)|tendencias de la ultima semana en empleos|han? contratado a profesionales cerca de ti|alertas? de empleos?)\b/;
 const sentAmountEvidence = /\bimporte enviado\b/;
 const cardLabel = /(?:tarjeta(?:[ \t]+(?:de[ \t]+)?(?:d[eé]bito|cr[eé]dito))?|t[ \t]*\.[ \t]*(?:d[eé]b(?:ito)?|cr[eé]d(?:ito)?))\b/.source;
 const cardNumberPrefix = /[ \t]*\.?[ \t]*(?:(?:terminad[ao][ \t]+en|n[uú]mero|nro\.?|no\.?|de|es)[ \t]+)?[:# \t-]*/.source;
@@ -129,7 +130,8 @@ function rejectedGmailNotice(subject: string, head: string, completion: string, 
   const unpaidReminder = paymentReminder.test(subject) && /\bpast due balance\b/.test(head) &&
     !confirmedAmountPaid.test(completion) && !expenseEvidence.test(completion) && !receiptEvidence.test(completion);
   return excludedSubject.test(subject) || unpaidInvoice || unprocessedPayment || unpaidReminder || excluded.test(head) || blocksGmailCompletion(head) ||
-    mailingListDelivery.test(completion) || unpaidAccountNotice.test(subject + '\n' + completion) ||
+    mailingListDelivery.test(completion) || employmentAlert.test(subject + '\n' + completion) ||
+    unpaidAccountNotice.test(subject + '\n' + completion) ||
     qaSubject.test(subject) || (noChargeTrial.test(head) && !confirmedAmountPaid.test(head));
 }
 

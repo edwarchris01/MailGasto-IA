@@ -70,6 +70,35 @@ test('marketing delivery footer is not proof that the recipient received money',
   assert.equal(isGmailExplicitNonMovement('Compra realizada', receipt), false);
 });
 
+test('employment alerts are non-movements even when cargo means job role or the offer contains a salary', () => {
+  const subject = 'Ingeniero de software: Inter Rapidísimo ha contratado a profesionales cerca de ti';
+  const observed = 'PERSONA PRUEBA, Inter Rapidísimo es una de las empresas destacadas que buscan personal para el puesto de Ingeniero de software.\n' +
+    'Tendencias de la última semana en empleos de Ingeniero de software\nEmpresas que buscan personal para tu cargo\n' +
+    'Las empresas de mayor tendencia\nEste email está dirigido a PERSONA PRUEBA (Desarrollador Backend)\n' +
+    'Recibes emails sobre notificaciones de LinkedIn.';
+  const salary = 'Empresas que buscan personal para tu cargo. Salario: COP 5.000.000 a COP 7.000.000. Publicado el 13/11/2026.';
+  for (const [title, body] of [[subject, observed], ['Vacantes de ingeniería', salary],
+    ['Actualizaciones de tu cargo', 'Recibes emails sobre notificaciones de LinkedIn.']]) {
+    assert.equal(candidate('messages-noreply@linkedin.com', title, body, gmailBankSenders, true), null, title);
+    assert.equal(isGmailExplicitNonMovement(title, body), true, title);
+    assert.equal(resolveGmailExtraction({ provider: 'other', forwarded: false, subject: title, body },
+      null, true, undefined, '2026-11-13T22:01:24Z').status, 'ignored', title);
+  }
+});
+
+test('a synthetic paid LinkedIn Premium receipt survives the same notification footer', () => {
+  const subject = 'Recibo de pago de LinkedIn Premium';
+  const body = 'Tu pago fue procesado. Pagaste COP 49.900 por LinkedIn Premium el 13/11/2026.\n' +
+    'Empresas que buscan personal para tu cargo\nRecibes emails sobre notificaciones de LinkedIn.';
+  const notice = candidate('messages-noreply@linkedin.com', subject, body, gmailBankSenders, true);
+  assert.ok(notice);
+  assert.equal(isGmailExplicitNonMovement(subject, body), false);
+  const result = resolveGmailExtraction(notice, null, true, undefined, '2026-11-13T22:01:24Z');
+  assert.equal(result.status, 'registered');
+  assert.deepEqual([result.movement?.amountMinor, result.movement?.currency, result.movement?.direction,
+    result.movement?.date, result.movement?.dateSource], ['4990000', 'COP', 'expense', '2026-11-13', 'reported']);
+});
+
 test('Nequi outgoing Bre-B registers bare amounts and Spanish dates without requiring a purpose', () => {
   for (const [amount, clock, expectedTime] of [['80.000', 'a la 1:12 a.m.', '01:12'], ['440.000', 'a las 4:13 a.m.', '04:13']]) {
     const notice = candidate('notificaciones@nequi.com.co', '¡Enviaste plata por Bre-B!',
