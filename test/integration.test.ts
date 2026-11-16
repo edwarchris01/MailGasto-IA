@@ -468,7 +468,13 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
       assert.equal(await gmail.scanReprocessPage(), true);
       assert.equal(await gmail.scanReprocessPage(), true);
       const repeatedWebhooksBefore = deliveries.length;
-      for (let index = 0; index < 6; index++) assert.equal(await gmail.dispatchOne(), true);
+      const repeated = (await db.query('SELECT message_id FROM gmail_deliveries WHERE mailbox_id=$1 AND completed_at IS NULL', [linked])).rows;
+      for (const id of ['past-qr', 'past-copy', 'past-not-authenticated', 'past-uncertain']) {
+        assert(repeated.some(row => row.message_id === id), 'The repeat must include ' + id);
+      }
+      assert(repeated.every(row => row.message_id === 'direct' || Object.hasOwn(historical, row.message_id)));
+      // Complete metadata needs no second read, and the synthetic current message may be beyond this snapshot.
+      for (const _ of repeated) assert.equal(await gmail.dispatchOne(), true);
       assert.equal(await gmail.dispatchOne(), false);
       assert.equal(deliveries.length, repeatedWebhooksBefore + 1);
       assert.equal((await (await post(filterAndResolve(oauthInput(deliveries.at(-1)!), uncertainModel))).json()).outcome, 'stored');
