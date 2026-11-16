@@ -5,11 +5,19 @@ import { Pool } from 'pg';
 import { DateTime } from 'luxon';
 import { encrypt, readConfig } from '../src/config.js';
 import { Database } from '../src/db.js';
-import { Gmail, gmailClassifierVersion } from '../src/gmail.js';
+import { Gmail, gmailClassifierVersion, gmailFailureDiagnostic } from '../src/gmail.js';
 import { GmailExtraction } from '../src/gmail-extraction.js';
 import { GmailResults } from '../src/gmail-results.js';
 
 const connection = process.env.MAILGASTO_TEST_DATABASE_URL;
+
+test('delivery diagnostics retain SQLSTATE without logging email contents or database values', () => {
+  const error = Object.assign(new Error('private email body and row values'), {
+    code: '23514', detail: 'private financial record', constraint: 'private-name',
+  });
+  assert.deepEqual(gmailFailureDiagnostic(error), { errorType: 'database', sqlState: '23514' });
+  assert.deepEqual(gmailFailureDiagnostic(new TypeError('secret payload')), { errorType: 'processing' });
+});
 
 test('Gmail reconciles a bounded month, exposes failures and recovers without repeating completed work', { skip: !connection }, async t => {
   const base = new URL(connection!);
@@ -219,5 +227,54 @@ test('Gmail reconciles a bounded month, exposes failures and recovers without re
     await gmail.scanReprocessPage();
     assert.equal(await gmail.dispatchOne(), false);
     assert.equal(readIds.filter(id => id === 'registered-details').length, 1);
+    await finishScan();
+  });
+
+  await t.test('concurrent workers share one durable classifier slot without consuming deferred attempts', async () => {
+    ids = ['queued-model-a', 'queued-model-b'];
+    await makeDue();
+    await gmail.reconcileOne();
+    await gmail.scanReprocessPage();
+    const otherWorker = new Gmail(db, config, new GmailExtraction(config), results);
+    const postedBefore = posted.length;
+    await Promise.all([gmail.dispatchOne(), otherWorker.dispatchOne()]);
+    assert.equal(posted.length, postedBefore + 1, 'Only one worker may submit to the local model');
+    const claimed = (await db.query('SELECT message_id,attempts,attempt_id,webhook_accepted_at,completed_at FROM gmail_deliveries ' +
+      'WHERE message_id=ANY($1) ORDER BY attempts', [ids])).rows;
+    assert.equal(claimed[0].attempts, 0, 'Waiting for model capacity is not a failed delivery attempt');
+    assert.equal(claimed[0].attempt_id, null);
+    assert.equal(claimed[0].webhook_accepted_at, null);
+    assert.equal(claimed[0].completed_at, null);
+    assert.equal(claimed[1].attempts, 1);
+    assert(claimed[1].webhook_accepted_at);
+    const complete = async (identity: Record<string, unknown>) => results.save({ source: 'oauth',
+      deliveryId: identity.deliveryId as string, attemptId: identity.attemptId as string,
+      messageId: identity.messageId as string, receivedAt: identity.receivedAt as string, status: 'ignored' });
+    await complete(posted.at(-1)!);
+    await db.query('UPDATE gmail_deliveries SET due_at=now() WHERE message_id=$1', [claimed[0].message_id]);
+    await new Gmail(db, config, new GmailExtraction(config), results).dispatchOne();
+    assert.equal(posted.length, postedBefore + 2, 'A new worker continues after the persisted slot is released');
+    const second = posted.at(-1)!;
+    // A missing callback records an actionable cause and still obeys the delivery attempt bound.
+    await db.query('UPDATE gmail_deliveries SET due_at=now() WHERE message_id=$1', [second.messageId]);
+    await otherWorker.dispatchOne();
+    assert.equal((await row(second.messageId as string)).last_error, 'callback_timeout');
+    await complete(posted.at(-1)!);
+    assert.equal((await row(second.messageId as string)).last_error, null);
+    await finishScan();
+  });
+
+  await t.test('a storage failure is diagnosable from mailbox status without exposing private values', async s => {
+    ids = ['storage-diagnostic'];
+    rawById.set(ids[0], rawById.get('registered-details')!);
+    await makeDue();
+    await gmail.reconcileOne();
+    await gmail.scanReprocessPage();
+    s.mock.method(results, 'save', async () => { throw Object.assign(new Error('secret row contents'), { code: '23514' }); });
+    await gmail.dispatchOne();
+    const diagnostic = (await gmail.list(owner.id))[0].delivery as { lastError: string; retrying: number };
+    assert.equal(diagnostic.lastError, 'gmail_processing_failed:store_result:23514');
+    assert.equal(diagnostic.retrying, 1);
+    assert.doesNotMatch(JSON.stringify(diagnostic), /secret|row contents/);
   });
 });
