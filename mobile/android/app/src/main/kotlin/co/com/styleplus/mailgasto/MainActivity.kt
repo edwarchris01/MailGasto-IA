@@ -2,18 +2,32 @@ package co.com.styleplus.mailgasto
 
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.Manifest
 import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.browser.auth.AuthTabIntent
 import androidx.browser.customtabs.CustomTabsClient
 import androidx.browser.customtabs.CustomTabsIntent
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import co.com.styleplus.mailgasto.sms.SmsStore
+import co.com.styleplus.mailgasto.sms.SmsJobs
+import co.com.styleplus.mailgasto.sms.smsPermissions
+import java.util.concurrent.Executors
 
 class MainActivity : FlutterFragmentActivity() {
     private var pendingReturn: Uri? = null
     private var browserChannel: MethodChannel? = null
+    private var smsChannel: MethodChannel? = null
+    private var smsPermissionResult: MethodChannel.Result? = null
+    private val smsExecutor = Executors.newSingleThreadExecutor()
+    private val smsPermissionsLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        smsPermissionResult?.success(smsPermissions(this))
+        smsPermissionResult = null
+    }
     private val authLauncher = AuthTabIntent.registerActivityResultLauncher(this, ::onGoogleResult)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -26,8 +40,45 @@ class MainActivity : FlutterFragmentActivity() {
         super.onSaveInstanceState(outState)
     }
 
+    override fun onDestroy() {
+        smsExecutor.shutdown()
+        super.onDestroy()
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        smsChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "co.com.styleplus.mailgasto/sms")
+        smsChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "requestPermissions" -> {
+                    if (smsPermissions(this)) result.success(true)
+                    else if (smsPermissionResult != null) result.error("SMS_PERMISSION_PENDING", "Responde el permiso de Android.", null)
+                    else {
+                        smsPermissionResult = result
+                        smsPermissionsLauncher.launch(arrayOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS))
+                    }
+                }
+                "settings" -> {
+                    startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+                    result.success(null)
+                }
+                "status", "configure", "clear", "scan" -> smsExecutor.execute {
+                    try {
+                        val store = SmsStore(applicationContext)
+                        when (call.method) {
+                            "configure" -> store.configure(call.arguments as Map<*, *>)
+                            "clear" -> store.clear()
+                            "scan" -> if (store.snapshot().optBoolean("enabled") && smsPermissions(applicationContext)) SmsJobs.scan(applicationContext)
+                        }
+                        val status = store.status()
+                        runOnUiThread { result.success(status) }
+                    } catch (_: Exception) {
+                        runOnUiThread { result.error("SMS_UNAVAILABLE", "No se pudo completar la configuración de SMS.", null) }
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
         browserChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, BROWSER_CHANNEL)
         browserChannel?.setMethodCallHandler { call, result ->
             if (call.method != "open") {
@@ -60,6 +111,8 @@ class MainActivity : FlutterFragmentActivity() {
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         browserChannel?.setMethodCallHandler(null)
         browserChannel = null
+        smsChannel?.setMethodCallHandler(null)
+        smsChannel = null
         super.cleanUpFlutterEngine(flutterEngine)
     }
 

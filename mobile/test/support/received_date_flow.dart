@@ -12,11 +12,15 @@ import 'package:timezone/data/latest.dart' as tz;
 
 // The real detail and correction screens, with an in-memory repository.
 // Never writes to a real account or reads its secure storage.
-Future<void> verifyReceivedDate(WidgetTester tester) async {
+Future<void> verifyReceivedDate(
+  WidgetTester tester, {
+  String source = 'email',
+}) async {
   await initializeDateFormatting('es_CO');
   tz.initializeTimeZones();
   final api = ApiClient(Uri.parse('http://localhost:3199'));
-  final repository = _ReceiptFinance(api);
+  final repository = _ReceiptFinance(api, source);
+  final message = source == 'sms' ? 'SMS' : 'correo';
   final container = ProviderContainer(
     overrides: [financeRepositoryProvider.overrideWithValue(repository)],
   );
@@ -52,7 +56,7 @@ Future<void> verifyReceivedDate(WidgetTester tester) async {
   expect(find.text('Fecha estimada (recepción)'), findsOneWidget);
   // UTC receipt is the following day; the UI must use Bogotá's date/time.
   expect(find.text('15/11/2026 23:40'), findsOneWidget);
-  expect(find.text('Fecha tomada del correo'), findsOneWidget);
+  expect(find.text('Fecha tomada del $message'), findsOneWidget);
   expect(find.text('Hora indicada'), findsNothing);
 
   final correction = find.widgetWithText(OutlinedButton, 'Corregir datos');
@@ -60,7 +64,7 @@ Future<void> verifyReceivedDate(WidgetTester tester) async {
   await tester.pumpAndSettle();
   await tester.tap(correction);
   await tester.pumpAndSettle();
-  expect(find.text('Fecha original tomada del correo'), findsOneWidget);
+  expect(find.text('Fecha original tomada del $message'), findsOneWidget);
   await tester.enterText(
     find.byKey(const ValueKey('movement-amount')),
     '51000',
@@ -90,19 +94,21 @@ Future<void> verifyReceivedDate(WidgetTester tester) async {
   expect(find.text('Fecha estimada (recepción)'), findsNothing);
   expect(find.text('14 nov 2026'), findsOneWidget);
   expect(find.text('14 nov 2026 · 23:40'), findsNothing);
-  expect(find.text('Recepción del correo'), findsOneWidget);
+  expect(find.text('Recepción del $message'), findsOneWidget);
   expect(find.text('15/11/2026 23:40'), findsOneWidget);
 }
 
 class _ReceiptFinance extends FinanceRepository {
-  _ReceiptFinance(super.api);
+  _ReceiptFinance(super.api, this.source);
+
+  final String source;
 
   Json? saved;
 
   @override
   Future<Movement> detail(String id) async => Movement.fromJson({
     'id': id,
-    'source': 'email',
+    'source': source,
     'direction': 'expense',
     'amount_minor': saved?['amountMinor'] ?? '5000000',
     'transaction_date': saved?['date'] ?? '2026-11-15',

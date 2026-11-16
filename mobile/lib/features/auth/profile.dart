@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/api.dart';
 import '../../core/design.dart';
 import '../../core/widgets.dart';
+import '../../core/sms_bridge.dart';
 import '../mailboxes/mailboxes.dart';
 import 'auth.dart';
 
@@ -45,6 +46,15 @@ class ProfileScreen extends ConsumerWidget {
           ],
           const SectionHeading('Ajustes de la cuenta'),
           const SizedBox(height: 10),
+          if (ref.read(smsBridgeProvider).supported) ...[
+            _AccountRow(
+              icon: Icons.sms_outlined,
+              title: 'SMS de Nequi',
+              description: 'Detección e importación automática',
+              onTap: () => context.go('/settings/sms'),
+            ),
+            const SizedBox(height: 10),
+          ],
           _AccountRow(
             icon: Icons.mail_outline,
             title: 'Buzones',

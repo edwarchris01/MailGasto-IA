@@ -621,6 +621,7 @@ class _MovementDetailState extends ConsumerState<_MovementDetail> {
   Widget build(BuildContext context) {
     final item = widget.item;
     final details = item.emailDetails;
+    final messageSource = item.source == 'sms' ? 'SMS' : 'correo';
     final timeOnOriginalDate =
         details != null &&
         details.originalDate != item.date &&
@@ -700,14 +701,17 @@ class _MovementDetailState extends ConsumerState<_MovementDetail> {
             const SizedBox(height: 10),
             AppNotice(
               icon: Icons.schedule_outlined,
-              title: 'Fecha tomada del correo',
+              title: 'Fecha tomada del $messageSource',
               description: item.reported.usesReceiptDate(item.date)
-                  ? 'El aviso no indicó la fecha de la operación. Se usó la fecha y hora de recepción del correo. Puedes ajustar la fecha en Corregir datos.'
-                  : 'La fecha original se tomó de la recepción del correo. La fecha del movimiento fue corregida.',
+                  ? 'El aviso no indicó la fecha de la operación. Se usó la fecha y hora de recepción del $messageSource. Puedes ajustar la fecha en Corregir datos.'
+                  : 'La fecha original se tomó de la recepción del $messageSource. La fecha del movimiento fue corregida.',
             ),
             if (!item.reported.usesReceiptDate(item.date))
               DetailFields([
-                ('Recepción del correo', syncLabel(item.reported.receivedAt!)),
+                (
+                  'Recepción del $messageSource',
+                  syncLabel(item.reported.receivedAt!),
+                ),
               ]),
           ],
           if (item.manual) ...[

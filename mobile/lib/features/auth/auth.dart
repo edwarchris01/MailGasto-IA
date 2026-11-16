@@ -11,6 +11,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/api.dart';
 import '../../core/design.dart';
 import '../../core/google_browser.dart';
+import '../../core/sms_bridge.dart';
 import '../../core/widgets.dart';
 
 typedef Account = ({String id, String name, String email});
@@ -132,11 +133,15 @@ class AuthViewModel extends AsyncNotifier<Account?> {
     api.onUnauthorized = (token) => unawaited(_expire(token));
     final storage = ref.read(secureStorageProvider);
     api.session = await storage.read(key: _key);
-    if (api.session == null) return null;
+    if (api.session == null) {
+      await _stopSms(null);
+      return null;
+    }
     try {
       return await _repository.restore();
     } on ApiFailure catch (error) {
       if (error.status != 401) rethrow;
+      await _stopSms(api.session);
       api.session = null;
       await storage.delete(key: _key);
       return null;
@@ -227,6 +232,7 @@ class AuthViewModel extends AsyncNotifier<Account?> {
 
   Future<void> _expire(String token) async {
     if (_api.session != token) return;
+    await _stopSms(token);
     _api.session = null;
     state = const AsyncLoading();
     try {
@@ -234,6 +240,34 @@ class AuthViewModel extends AsyncNotifier<Account?> {
       state = const AsyncData(null);
     } catch (error, stack) {
       state = AsyncError(error, stack);
+    }
+  }
+
+  Future<void> _stopSms(String? token) async {
+    final bridge = ref.read(smsBridgeProvider);
+    if (!bridge.supported) return;
+    String? serverId;
+    try {
+      serverId = (await bridge.status()).serverId;
+    } catch (_) {
+      // Clearing local credentials must not depend on reading their status.
+    }
+    try {
+      await bridge.clear();
+      if (serverId != null && token != null) {
+        unawaited(
+          _api
+              .request(
+                'sms/devices/${Uri.encodeComponent(serverId)}',
+                method: 'DELETE',
+                revokeSession: token,
+                expireOnUnauthorized: false,
+              )
+              .then<void>((_) {}, onError: (Object _) {}),
+        );
+      }
+    } catch (_) {
+      // The server also revokes SMS credentials on explicit logout.
     }
   }
 }

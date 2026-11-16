@@ -8,7 +8,7 @@ import '../auth/auth.dart';
 import 'expenses.dart';
 
 const currencies = {'COP': 'COP', 'USD': 'USD', 'EUR': 'EUR'};
-const movementSources = {'email': 'Correo', 'manual': 'Manual'};
+const movementSources = {'email': 'Correo', 'sms': 'SMS', 'manual': 'Manual'};
 
 typedef FinanceRange = ({String from, String to, String currency});
 typedef MovementPage = ({List<Movement> items, int page, bool hasMore});
@@ -108,7 +108,12 @@ class Movement {
   bool get manual => source == 'manual';
   String get kind => income ? 'Ingreso' : 'Gasto';
   String get title =>
-      description ?? '$kind ${manual ? 'manual' : 'por correo'}';
+      description ??
+      '$kind ${manual
+          ? 'manual'
+          : source == 'sms'
+          ? 'por SMS'
+          : 'por correo'}';
   String get signedAmount => '${income ? '+' : '−'} ${money(minor, currency)}';
 }
 

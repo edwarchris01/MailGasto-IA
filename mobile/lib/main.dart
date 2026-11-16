@@ -18,6 +18,7 @@ import 'features/expenses/finance_screens.dart';
 import 'features/expenses/history_screen.dart';
 import 'features/expenses/movements_screen.dart';
 import 'features/mailboxes/mailboxes.dart';
+import 'features/sms/sms.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -167,6 +168,7 @@ final routerProvider = Provider((ref) {
                 path: '/settings',
                 builder: (_, _) => const ProfileScreen(),
                 routes: [
+                  GoRoute(path: 'sms', builder: (_, _) => const SmsScreen()),
                   GoRoute(
                     path: 'mailboxes',
                     builder: (_, _) => const MailboxesScreen(),

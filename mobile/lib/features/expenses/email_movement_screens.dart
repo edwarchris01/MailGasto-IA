@@ -231,9 +231,10 @@ class _EmailMovementCorrectionFormState
         ),
         const SizedBox(height: 12),
         if (item.reported.dateFromReceipt) ...[
-          const AppNotice(
+          AppNotice(
             icon: Icons.schedule_outlined,
-            title: 'Fecha original tomada del correo',
+            title:
+                'Fecha original tomada del ${item.source == 'sms' ? 'SMS' : 'correo'}',
             description:
                 'El aviso no indicó la fecha de la operación. Se usó su recepción; puedes seleccionar la fecha real de la operación.',
           ),
