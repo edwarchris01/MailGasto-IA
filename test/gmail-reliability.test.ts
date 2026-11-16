@@ -7,6 +7,7 @@ import { encrypt, readConfig } from '../src/config.js';
 import { Database } from '../src/db.js';
 import { Gmail, gmailClassifierVersion, gmailFailureDiagnostic } from '../src/gmail.js';
 import { GmailExtraction } from '../src/gmail-extraction.js';
+import { readGmailMime } from '../src/gmail-mime.js';
 import { GmailResults } from '../src/gmail-results.js';
 
 const connection = process.env.MAILGASTO_TEST_DATABASE_URL;
@@ -335,31 +336,84 @@ test('Gmail reconciles a bounded month, exposes failures and recovers without re
   });
 
   await t.test('a registered transfer is enriched locally while preserving its financial values', async () => {
-    const id = 'registered-transfer-review';
-    const sender = 'alertasynotificaciones@an.notificacionesbancolombia.com';
-    rawById.set(id, Buffer.from('From: <' + sender + '>\r\nSubject: Alertas y Notificaciones\r\n' +
-      'Authentication-Results: mx.google.com; dmarc=pass header.from=notificacionesbancolombia.com\r\n' +
-      'MIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n' +
-      'Bancolombia: Recibiste una transferencia por $35.000 el ' + received.toFormat('dd/MM/yy') + ' a las 21:11.',
-    ).toString('base64url'));
-    const { rows: [notice] } = await db.query<{ id: string }>(
-      'INSERT INTO notices (mailbox_id,message_id,received_at,provider,forwarded,status,transaction_time,reported_payment_method) ' +
-      "VALUES ($1,$2,$3,'other',false,'registered','21:11','Transferencia') RETURNING id", [mailbox.id, id, received.toJSDate()]);
-    await db.query('INSERT INTO transactions (notice_id,amount_minor,currency,transaction_date,payment_method,description,category,direction) ' +
-      "VALUES ($1,3500000,'COP',$2,'Transferencia','Descripción conservada','ingresos','income')", [notice.id, received.toISODate()]);
+    for (const mode of ['plain', 'alternative', 'alternative-reversed']) {
+      const id = 'registered-transfer-review-' + mode;
+      const sender = 'alertasynotificaciones@an.notificacionesbancolombia.com';
+      const body = 'Bancolombia: Recibiste una transferencia por $35.000 el ' + received.toFormat('dd/MM/yy') + ' a las 21:11.';
+      const header = 'From: <' + sender + '>\r\nSubject: Alertas y Notificaciones\r\n' +
+        'Authentication-Results: mx.google.com; dmarc=pass header.from=notificacionesbancolombia.com\r\nMIME-Version: 1.0\r\n';
+      const incompleteBody = 'Bancolombia: Recibiste una transferencia. Consulta el detalle en la versión HTML.';
+      const message = Buffer.from(header + (mode === 'plain' ? 'Content-Type: text/plain; charset=UTF-8\r\n\r\n' + body :
+        'Content-Type: multipart/alternative; boundary=banknotice\r\n\r\n' +
+        '--banknotice\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n' + (mode === 'alternative' ? incompleteBody : body) + '\r\n' +
+        '--banknotice\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<p>' + (mode === 'alternative' ? body : incompleteBody) + '</p>\r\n--banknotice--\r\n'));
+      rawById.set(id, message.toString('base64url'));
+      if (mode === 'alternative') {
+        const parsed = await readGmailMime(message, ['INBOX']);
+        const extractor = new GmailExtraction(config);
+        const plain = await extractor.classify(parsed.email, false, parsed.authenticated, received.toISO()!);
+        const html = await extractor.classify({ ...parsed.email, text: parsed.alternative! }, false, parsed.authenticated, received.toISO()!);
+        assert.equal(plain.status, 'pending');
+        assert.equal(html.status, 'pending');
+        if (plain.status === 'pending' && html.status === 'pending') {
+          assert.deepEqual(plain.unconfirmedFields, []);
+          assert.deepEqual(html.unconfirmedFields, []);
+          assert.equal(plain.evidence?.amountMinor, undefined);
+          assert.equal(html.evidence?.amountMinor, '3500000');
+        }
+      }
+      const { rows: [notice] } = await db.query<{ id: string }>(
+        'INSERT INTO notices (mailbox_id,message_id,received_at,provider,forwarded,status,transaction_time,reported_payment_method) ' +
+        "VALUES ($1,$2,$3,'other',false,'registered','21:11','Transferencia') RETURNING id", [mailbox.id, id, received.toJSDate()]);
+      await db.query('INSERT INTO transactions (notice_id,amount_minor,currency,transaction_date,payment_method,description,category,direction) ' +
+        "VALUES ($1,3500000,'COP',$2,'Transferencia','Descripción conservada','ingresos','income')", [notice.id, received.toISODate()]);
+      const postedBefore = posted.length;
+      const finances = () => db.query('SELECT amount_minor::text,currency,transaction_date::text,payment_method,description,category,direction ' +
+        'FROM transactions WHERE notice_id=$1', [notice.id]);
+      const original = (await finances()).rows[0];
+      ids = [id];
+      await gmail.reprocessMonth(owner.id, mailbox.id);
+      await gmail.scanReprocessPage();
+      assert.equal(await gmail.dispatchOne(), true);
+      assert.equal((await row(id)).outcome, 'skipped');
+      assert.equal(posted.length, postedBefore);
+      assert.deepEqual((await finances()).rows[0], original);
+      assert.deepEqual((await db.query('SELECT provider,reported_institution,status,transaction_time FROM notices WHERE id=$1', [notice.id])).rows[0],
+        { provider: 'bancolombia', reported_institution: 'bancolombia', status: 'registered', transaction_time: '21:11' });
+      await finishScan();
+    }
+  });
+
+  await t.test('MIME alternatives keep complementary evidence separate and refuse contradictory financial values', async () => {
+    const date = received.toFormat('dd/MM/yy');
+    const original = `Bancolombia: Recibiste una transferencia por $35.000 el ${date} a las 21:11.`;
+    const cases = [
+      { id: 'mime-amount-conflict', plain: original, html: original.replace('$35.000', '$45.000'), amount: null, date: null },
+      { id: 'mime-date-conflict', plain: original,
+        html: original.replace(date, received.minus({ days: 1 }).toFormat('dd/MM/yy')), amount: null, date: null },
+      { id: 'mime-complementary', plain: 'Bancolombia: Recibiste una transferencia por $35.000.',
+        html: `Bancolombia: Recibiste una transferencia el ${date}.`, amount: '3500000', date: null },
+      { id: 'mime-pending-registered-conflict', plain: original,
+        html: `Bancolombia: Compraste $35.000 en TIENDA DEMO con tu T.Deb *1234, el ${date} a las 21:11.`, amount: null, date: null },
+    ];
+    for (const item of cases) rawById.set(item.id, Buffer.from([
+      'From: <alertasynotificaciones@an.notificacionesbancolombia.com>', 'Subject: Alertas y Notificaciones',
+      'Authentication-Results: mx.google.com; dmarc=pass header.from=notificacionesbancolombia.com', 'MIME-Version: 1.0',
+      'Content-Type: multipart/alternative; boundary=review', '',
+      '--review', 'Content-Type: text/plain; charset=UTF-8', '', item.plain,
+      '--review', 'Content-Type: text/html; charset=UTF-8', '', '<p>' + item.html + '</p>', '--review--', '',
+    ].join('\r\n')).toString('base64url'));
+    const movementsBefore = (await db.query('SELECT count(*)::int AS total FROM transactions')).rows[0].total;
     const postedBefore = posted.length;
-    const finances = () => db.query('SELECT amount_minor::text,currency,transaction_date::text,payment_method,description,category,direction ' +
-      'FROM transactions WHERE notice_id=$1', [notice.id]);
-    const original = (await finances()).rows[0];
-    ids = [id];
+    ids = cases.map(item => item.id);
     await gmail.reprocessMonth(owner.id, mailbox.id);
     await gmail.scanReprocessPage();
-    assert.equal(await gmail.dispatchOne(), true);
-    assert.equal((await row(id)).outcome, 'skipped');
+    for (const _ of ids) assert.equal(await gmail.dispatchOne(), true);
+    for (const item of cases) assert.deepEqual((await db.query(
+      'SELECT status,reason,reported_amount_minor::text,reported_transaction_date::text FROM notices WHERE message_id=$1', [item.id])).rows[0],
+    { status: 'pending', reason: 'unconfirmed_extraction', reported_amount_minor: item.amount, reported_transaction_date: item.date }, item.id);
+    assert.equal((await db.query('SELECT count(*)::int AS total FROM transactions')).rows[0].total, movementsBefore);
     assert.equal(posted.length, postedBefore);
-    assert.deepEqual((await finances()).rows[0], original);
-    assert.deepEqual((await db.query('SELECT provider,reported_institution,status,transaction_time FROM notices WHERE id=$1', [notice.id])).rows[0],
-      { provider: 'bancolombia', reported_institution: 'bancolombia', status: 'registered', transaction_time: '21:11' });
     await finishScan();
   });
 

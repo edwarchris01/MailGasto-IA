@@ -16,7 +16,7 @@ const tokenUrl = 'https://oauth2.googleapis.com/token';
 const maxRawSize = 1_500_000;
 const maxReprocessAttempts = 5;
 // Bump when extraction rules change: unresolved notices receive one new review.
-export const gmailClassifierVersion = '2026-11-16.1';
+export const gmailClassifierVersion = '2026-11-16.2';
 const recoverableDeliveryErrors = ['webhook_timeout', 'webhook_unavailable', 'callback_timeout',
   'gmail_processing_failed', 'attempts_exhausted', 'extractor_unavailable', 'ollama_unavailable', 'invalid_model_output'];
 
@@ -589,10 +589,33 @@ export class Gmail {
             status: 'pending', reason: 'unconfirmed_extraction', confidence: 0 });
           return true;
         }
+        const primaryEvidence = classification.status === 'registered' ? classification.movement :
+          classification.status === 'pending' ? classification.evidence : undefined;
+        const alternateEvidence = alternateResult.status === 'registered' ? alternateResult.movement :
+          alternateResult.status === 'pending' ? alternateResult.evidence : undefined;
+        const fundamentalFields = ['amountMinor', 'currency', 'date', 'direction'] as const;
+        const detailFields = ['paymentMethod', 'transactionTime', 'cardType', 'cardLast4', 'reportedInstitution'] as const;
+        if (primaryEvidence && alternateEvidence && fundamentalFields.some(key =>
+          primaryEvidence[key] != null && alternateEvidence[key] != null && primaryEvidence[key] !== alternateEvidence[key])) {
+          stage = 'store_mime_conflict';
+          if (readable.status !== 'ignored') await this.results.save({ source: 'oauth', ...identity,
+            provider: readable.provider, forwarded: readable.forwarded,
+            status: 'pending', reason: 'unconfirmed_extraction', confidence: 0 });
+          return true;
+        }
+        const primaryCore = fundamentalFields.filter(key => primaryEvidence?.[key] != null).length;
+        const alternateCore = fundamentalFields.filter(key => alternateEvidence?.[key] != null).length;
+        const primaryDetails = detailFields.filter(key => primaryEvidence?.[key] != null).length;
+        const alternateDetails = detailFields.filter(key => alternateEvidence?.[key] != null).length;
+        // Purpose-review results can have no unconfirmedFields even when their literal evidence is incomplete.
+        // Pick one complete body; never assemble an amount from one MIME part and a date from another.
+        const richerPending = classification.status === 'pending' && alternateResult.status === 'pending' &&
+          (alternateCore > primaryCore || alternateCore === primaryCore &&
+            (alternateDetails > primaryDetails || alternateDetails === primaryDetails &&
+              (classification.unconfirmedFields?.length ?? 0) > (alternateResult.unconfirmedFields?.length ?? 0)));
         if ((classification.status === 'ignored' && alternateResult.status !== 'ignored') ||
             (classification.status !== 'registered' && alternateResult.status === 'registered') ||
-            (classification.status === 'pending' && alternateResult.status === 'pending' &&
-              (classification.unconfirmedFields?.length ?? 0) > (alternateResult.unconfirmedFields?.length ?? 0))) {
+            richerPending) {
           selected = alternate;
           classification = alternateResult;
         } else if (classification.status === 'registered' && alternateResult.status === 'registered') {
@@ -600,14 +623,6 @@ export class Gmail {
           const htmlReferences = alternateResult.references ?? [];
           const plainMovement = classification.movement;
           const htmlMovement = alternateResult.movement;
-          if ((['amountMinor', 'currency', 'date', 'direction'] as const).some(key => plainMovement[key] !== htmlMovement[key])) {
-            const { movement: _, references: _references, categoryFromPseConcept: _categoryProof, ...conflicting } = classification;
-            stage = 'store_mime_conflict';
-            await this.results.save({ source: 'oauth', ...identity, ...conflicting,
-              status: 'pending', reason: 'unconfirmed_extraction', confidence: 0 });
-            return true;
-          }
-          const detailFields = ['paymentMethod', 'transactionTime', 'cardType', 'cardLast4', 'reportedInstitution'] as const;
           if (detailFields.filter(key => htmlMovement[key] != null).length > detailFields.filter(key => plainMovement[key] != null).length) {
             selected = alternate;
             classification = alternateResult;
