@@ -310,7 +310,7 @@ test('Gmail direct and OAuth use n8n results, durable delivery, PostgreSQL and o
     'past-copy': rawMessage('Alertas y Notificaciones', deposits, bankAddress, true),
     'past-personal': rawMessage('Faltan fondos para pagar en Google', 'Faltan fondos para pagar $19.900 en Google.', 'nu@nu.com.co', 'nu.com.co'),
     'past-not-authenticated': rawMessage('Faltan fondos para pagar en Google', 'Faltan fondos para pagar $9.900 en Google.', 'nu@nu.com.co'),
-    'past-uncertain': rawMessage('Pago recibido', 'Recibimos tu pago de $37.200 el ' + operationDay + '.', shopSender),
+    'past-uncertain': rawMessage('Pago recibido', 'Recibimos tu pago de $37.200 el ' + operationDay + '.', shopSender, shopSender.split('@')[1]),
     'outside-month': rawMessage('Alertas y Notificaciones', deposits, bankAddress, true),
     'contradictory-mime': Buffer.from([
       'From: <' + bankAddress + '>', 'Subject: Alertas y Notificaciones',

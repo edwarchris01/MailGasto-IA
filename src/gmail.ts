@@ -631,11 +631,16 @@ export class Gmail {
           return true;
         }
       }
-      if (useOpenAi && classification.status === 'pending') {
+      // These outcomes come from a rule that no model can override: untrusted senders,
+      // own transfers, unspecified transfer purpose, credit/refund review, or receipt copies.
+      // Persist their evidence immediately instead of making it depend on model availability.
+      const localReview = classification.status === 'pending' &&
+        (classification.reason === 'unconfirmed_extraction' || 'avalCopy' in classification);
+      if (useOpenAi && classification.status === 'pending' && !localReview) {
         stage = 'openai';
         classification = await this.extraction.classify(selected, true, authenticated, identity.receivedAt);
       }
-      if (useOpenAi || !this.config.N8N_GMAIL_WEBHOOK_URL || classification.status === 'registered' ||
+      if (localReview || useOpenAi || !this.config.N8N_GMAIL_WEBHOOK_URL || classification.status === 'registered' ||
           classification.status === 'ignored') {
         stage = 'store_result';
         await this.results.save({ source: 'oauth', ...identity, ...classification },

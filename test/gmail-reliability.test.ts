@@ -264,6 +264,105 @@ test('Gmail reconciles a bounded month, exposes failures and recovers without re
     await finishScan();
   });
 
+  await t.test('deterministic reviews refresh exact transfer evidence without waiting for an unavailable model', async () => {
+    const day = received.setLocale('es').toFormat("d 'de' LLLL 'de' yyyy");
+    const bankDay = received.toFormat('dd/MM/yy');
+    const nequi = 'notificaciones@nequi.com.co';
+    const bank = 'alertasynotificaciones@an.notificacionesbancolombia.com';
+    const cases = [
+      { id: 'review-income', sender: nequi, subject: '¡Recibiste plata por Bre-B!',
+        body: `Recibiste 615.000 de PERSONA PRUEBA el ${day} a las 10:29 p.m, desde el banco Davivienda.`,
+        amount: '61500000', direction: 'income', time: '22:29', method: 'Bre-B', provider: 'nequi' },
+      { id: 'review-send-small', sender: nequi, subject: '¡Enviaste plata por Bre-B!',
+        body: `Enviaste de manera exitosa 80.000 a la llave 0090465666 de JUAN PRUEBA el ${day} a la 1:12 a.m.`,
+        amount: '8000000', direction: 'expense', time: '01:12', method: 'Bre-B', provider: 'nequi' },
+      { id: 'review-send-large', sender: nequi, subject: '¡Enviaste plata por Bre-B!',
+        body: `Enviaste de manera exitosa 440.000 a la llave 0090465666 de JUAN PRUEBA el ${day} a las 4:13 a.m.`,
+        amount: '44000000', direction: 'expense', time: '04:13', method: 'Bre-B', provider: 'nequi' },
+      { id: 'review-short-date-breb', sender: bank, subject: 'Transferencia Bre-B',
+        body: `Bancolombia: Transferiste $68.000 por Bre-B el ${bankDay} a las 22:14.`,
+        amount: '6800000', direction: 'expense', time: '22:14', method: 'Bre-B', provider: 'bancolombia' },
+      { id: 'review-short-date-transfer', sender: bank, subject: 'Alertas y Notificaciones',
+        body: `Bancolombia: Transferiste $5.000 a PERSONA PRUEBA el ${bankDay} a las 15:23.`,
+        amount: '500000', direction: 'expense', time: '15:23', method: null, provider: 'bancolombia' },
+    ];
+    const encode = (sender: string, subject: string, body: string, authenticated = true) => Buffer.from(
+      'From: <' + sender + '>\r\nSubject: ' + subject + '\r\n' +
+      (authenticated ? 'Authentication-Results: mx.google.com; dmarc=pass header.from=' + sender.split('@')[1] + '\r\n' : '') +
+      'MIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n' + body,
+    ).toString('base64url');
+    for (const item of cases) {
+      await db.query('INSERT INTO notices (mailbox_id,message_id,received_at,provider,forwarded,status,reason) ' +
+        "VALUES ($1,$2,$3,'other',false,'pending','missing_or_ambiguous_fields')", [mailbox.id, item.id, received.toJSDate()]);
+      rawById.set(item.id, encode(item.sender, item.subject, item.body));
+    }
+    const guards = [
+      { id: 'review-own-transfer', sender: bank, subject: 'Transferencia realizada',
+        body: `Bancolombia: Transferiste $20.000 entre tus cuentas propias el ${bankDay} a las 10:00.` },
+      { id: 'review-untrusted', sender: bank, subject: 'Compra realizada', authenticated: false,
+        body: `Bancolombia: Compraste $30.000 en TIENDA DEMO con tu T.Deb *1234, el ${bankDay} a las 11:00.` },
+      { id: 'review-credit', sender: 'servicios@agaval.com.co', subject: 'Pago realizado con tu crédito Agaval',
+        body: `Acabas de pagar por medio de tu crédito Agaval una compra realizada el ${received.toFormat('dd/MM/yyyy')}. Valor total de los bienes: $50.000.` },
+    ];
+    for (const item of guards) rawById.set(item.id, encode(item.sender, item.subject, item.body, item.authenticated));
+    ids = [...cases, ...guards].map(item => item.id);
+    webhookStatus = 503;
+    const postedBefore = posted.length;
+    const movementsBefore = (await db.query('SELECT count(*)::int AS total FROM transactions')).rows[0].total;
+    await gmail.reprocessMonth(owner.id, mailbox.id);
+    await gmail.scanReprocessPage();
+    for (const _ of ids) assert.equal(await gmail.dispatchOne(), true);
+    assert.equal(await gmail.dispatchOne(), false);
+    assert.equal(posted.length, postedBefore, 'A model cannot override these review guards and must not block their evidence');
+    for (const item of cases) {
+      const saved = (await db.query('SELECT provider,status,reason,reported_amount_minor::text,reported_currency,' +
+        'reported_transaction_date::text,reported_direction,transaction_time,reported_payment_method FROM notices WHERE message_id=$1', [item.id])).rows[0];
+      assert.deepEqual(saved, {
+        provider: item.provider, status: 'pending', reason: 'unconfirmed_extraction', reported_amount_minor: item.amount,
+        reported_currency: 'COP', reported_transaction_date: received.toISODate(), reported_direction: item.direction,
+        transaction_time: item.time, reported_payment_method: item.method,
+      }, item.id);
+      assert.equal((await row(item.id)).outcome, 'pending');
+    }
+    for (const item of guards) {
+      const saved = (await db.query('SELECT status,reason FROM notices WHERE message_id=$1', [item.id])).rows[0];
+      assert.deepEqual(saved, { status: 'pending', reason: 'unconfirmed_extraction' }, item.id);
+    }
+    assert.equal((await db.query('SELECT count(*)::int AS total FROM transactions')).rows[0].total, movementsBefore,
+      'Review evidence never invents or mutates an economic movement');
+    await finishScan();
+    webhookStatus = 202;
+  });
+
+  await t.test('a registered transfer is enriched locally while preserving its financial values', async () => {
+    const id = 'registered-transfer-review';
+    const sender = 'alertasynotificaciones@an.notificacionesbancolombia.com';
+    rawById.set(id, Buffer.from('From: <' + sender + '>\r\nSubject: Alertas y Notificaciones\r\n' +
+      'Authentication-Results: mx.google.com; dmarc=pass header.from=notificacionesbancolombia.com\r\n' +
+      'MIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n' +
+      'Bancolombia: Recibiste una transferencia por $35.000 el ' + received.toFormat('dd/MM/yy') + ' a las 21:11.',
+    ).toString('base64url'));
+    const { rows: [notice] } = await db.query<{ id: string }>(
+      'INSERT INTO notices (mailbox_id,message_id,received_at,provider,forwarded,status,transaction_time,reported_payment_method) ' +
+      "VALUES ($1,$2,$3,'other',false,'registered','21:11','Transferencia') RETURNING id", [mailbox.id, id, received.toJSDate()]);
+    await db.query('INSERT INTO transactions (notice_id,amount_minor,currency,transaction_date,payment_method,description,category,direction) ' +
+      "VALUES ($1,3500000,'COP',$2,'Transferencia','Descripción conservada','ingresos','income')", [notice.id, received.toISODate()]);
+    const postedBefore = posted.length;
+    const finances = () => db.query('SELECT amount_minor::text,currency,transaction_date::text,payment_method,description,category,direction ' +
+      'FROM transactions WHERE notice_id=$1', [notice.id]);
+    const original = (await finances()).rows[0];
+    ids = [id];
+    await gmail.reprocessMonth(owner.id, mailbox.id);
+    await gmail.scanReprocessPage();
+    assert.equal(await gmail.dispatchOne(), true);
+    assert.equal((await row(id)).outcome, 'skipped');
+    assert.equal(posted.length, postedBefore);
+    assert.deepEqual((await finances()).rows[0], original);
+    assert.deepEqual((await db.query('SELECT provider,reported_institution,status,transaction_time FROM notices WHERE id=$1', [notice.id])).rows[0],
+      { provider: 'bancolombia', reported_institution: 'bancolombia', status: 'registered', transaction_time: '21:11' });
+    await finishScan();
+  });
+
   await t.test('a storage failure is diagnosable from mailbox status without exposing private values', async s => {
     ids = ['storage-diagnostic'];
     rawById.set(ids[0], rawById.get('registered-details')!);
