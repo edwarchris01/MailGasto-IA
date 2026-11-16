@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { Pool } from 'pg';
 import { DateTime } from 'luxon';
 import { encrypt, readConfig } from '../src/config.js';
@@ -86,6 +87,20 @@ test('Gmail reconciles a bounded month, exposes failures and recovers without re
   const row = async (id: string) => (await db.query('SELECT * FROM gmail_deliveries WHERE message_id=$1', [id])).rows[0];
   const makeDue = async () => db.query("UPDATE mailboxes SET reconciliation_due_at=now()-interval '1 second' WHERE id=$1", [mailbox.id]);
   const finishScan = async () => { await gmail.scanReprocessPage(); };
+  const dispatchDue = async () => {
+    // The worker polls; local database clock corrections can briefly put a new due_at in the future.
+    // Never advance due_at here: the real retry backoff must remain effective.
+    const deadline = performance.now() + 2000;
+    let dispatched = await gmail.dispatchOne();
+    while (!dispatched && performance.now() < deadline) {
+      await delay(25);
+      dispatched = await gmail.dispatchOne();
+    }
+    assert.equal(dispatched, true, dispatched ? undefined : JSON.stringify((await db.query(
+      'SELECT message_id,attempts,outcome,due_at,now() AS database_now,completed_at,webhook_accepted_at ' +
+      'FROM gmail_deliveries WHERE completed_at IS NULL ORDER BY due_at',
+    )).rows));
+  };
 
   await t.test('initial reconciliation invokes n8n for incomplete rules and honors the callback', async () => {
     assert.equal(await gmail.reconcileOne(), true);
@@ -411,7 +426,7 @@ test('Gmail reconciles a bounded month, exposes failures and recovers without re
     ids = cases.map(item => item.id);
     await gmail.reprocessMonth(owner.id, mailbox.id);
     await gmail.scanReprocessPage();
-    for (const _ of ids) assert.equal(await gmail.dispatchOne(), true);
+    for (const _ of ids) await dispatchDue();
     for (const item of cases) assert.deepEqual((await db.query(
       'SELECT status,reason,reported_amount_minor::text,reported_transaction_date::text FROM notices WHERE message_id=$1', [item.id])).rows[0],
     { status: item.id === 'mime-complementary' ? 'registered' : 'pending', reason: item.id === 'mime-complementary' ? null : 'unconfirmed_extraction',
@@ -432,7 +447,7 @@ test('Gmail reconciles a bounded month, exposes failures and recovers without re
     await gmail.reconcileOne();
     await gmail.scanReprocessPage();
     s.mock.method(results, 'save', async () => { throw Object.assign(new Error('secret row contents'), { code: '23514' }); });
-    await gmail.dispatchOne();
+    await dispatchDue();
     const diagnostic = (await gmail.list(owner.id))[0].delivery as { lastError: string; retrying: number };
     assert.equal(diagnostic.lastError, 'gmail_processing_failed:store_result:23514');
     assert.equal(diagnostic.retrying, 1);
